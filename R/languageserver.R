@@ -9,11 +9,13 @@ LanguageServer <- R6::R6Class("LanguageServer",
         tcp = FALSE,
         inputcon = NULL,
         outputcon = NULL,
-        will_exit = NULL,
+        exit_flag = NULL,
         request_handlers = NULL,
         notification_handlers = NULL,
         documents = new.env(),
         workspace = NULL,
+
+        run_lintr = TRUE,
 
         processId = NULL,
         rootUri = NULL,
@@ -21,8 +23,8 @@ LanguageServer <- R6::R6Class("LanguageServer",
         initializationOptions = NULL,
         capabilities = NULL,
 
-        sync_input_queue = NULL,
-        sync_output_queue = NULL,
+        sync_input_dict = NULL,
+        sync_output_dict = NULL,
         reply_queue = NULL,
 
         initialize = function(host, port) {
@@ -45,13 +47,13 @@ LanguageServer <- R6::R6Class("LanguageServer",
             self$register_handlers()
 
             self$workspace <- Workspace$new()
-            self$sync_input_queue <- NamedQueue$new()
-            self$sync_output_queue <- NamedQueue$new()
-            self$reply_queue <- Queue$new()
+            self$sync_input_dict <- OrderedDictL$new()
+            self$sync_output_dict <- OrderedDictL$new()
+            self$reply_queue <- QueueL$new()
 
-            self$process_sync_input_queue <- leisurize(
-                function() process_sync_input_queue(self), 0.3)
-            self$process_sync_output_queue <- (function() process_sync_output_queue(self))
+            self$process_sync_input_dict <- leisurize(
+                function() process_sync_input_dict(self), 0.3)
+            self$process_sync_output_dict <- (function() process_sync_output_dict(self))
         },
 
         finalize = function() {
@@ -66,7 +68,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
 
         handle_raw = function(data) {
             tryCatch({
-                payload <- jsonlite::fromJSON(data)
+                payload <- jsonlite::fromJSON(data, simplifyVector = FALSE)
                 pl_names <- names(payload)
                 logger$info("received payload.")
             },
@@ -126,7 +128,9 @@ LanguageServer <- R6::R6Class("LanguageServer",
                 shutdown = on_shutdown,
                 `textDocument/completion` =  text_document_completion,
                 `textDocument/hover` = text_document_hover,
-                `textDocument/signatureHelp` = text_document_signature_help
+                `textDocument/signatureHelp` = text_document_signature_help,
+                `textDocument/formatting` = text_document_formatting,
+                `textDocument/rangeFormatting` = text_document_range_formatting
             )
 
             self$notification_handlers <- list(
@@ -135,83 +139,91 @@ LanguageServer <- R6::R6Class("LanguageServer",
                 `textDocument/didOpen` = text_document_did_open,
                 `textDocument/didChange` = text_document_did_change,
                 `textDocument/didSave` = text_document_did_save,
-                `textDocument/didClose` = text_document_did_close
+                `textDocument/didClose` = text_document_did_close,
+                `workspace/didChangeConfiguration` = workspace_did_change_configuration
             )
         },
 
         process_events = function() {
-            self$process_sync_input_queue()
-            self$process_sync_output_queue()
+            self$process_sync_input_dict()
+            self$process_sync_output_dict()
             self$process_reply_queue()
         },
 
-        process_sync_input_queue = NULL,
+        process_sync_input_dict = NULL,
 
-        process_sync_output_queue = NULL,
+        process_sync_output_dict = NULL,
 
         process_reply_queue = function() {
-            while (TRUE) {
-                notification <- self$reply_queue$get()
-                if (is.null(notification)) break
+            while (self$reply_queue$size() > 0) {
+                notification <- self$reply_queue$pop()
                 self$deliver(notification)
             }
         },
 
-        eventloop = function() {
-            tcp <- self$tcp
+        check_connection = function() {
+            if (!isOpen(self$inputcon)) {
+                self$exit_flag <- TRUE
+            }
+
+            if (.Platform$OS.type == "unix" && getppid() == 1) {
+                # exit if the current process becomes orphan
+                self$exit_flag <- TRUE
+            }
+        },
+
+        read_header = function() {
             con <- self$inputcon
+            if (self$tcp && !socketSelect(list(con), timeout = 0)) return(NULL)
+            header <- read_line(con)
+            if (length(header) == 0 || nchar(header) == 0) return(NULL)
+
+            logger$info("received: ", header)
+            matches <- stringr::str_match(header, "Content-Length: ([0-9]+)")
+            if (is.na(matches[2]))
+                stop("Unexpected input: ", header)
+            as.integer(matches[2])
+        },
+
+        read_content = function(nbytes) {
+            con <- self$inputcon
+            empty_line <- read_line(con)
+            while (length(empty_line) == 0) {
+                empty_line <- read_line(con)
+                Sys.sleep(0.01)
+            }
+            if (nchar(empty_line) > 0)
+                stop("Unexpected non-empty line")
+            data <- ""
+            while (nbytes > 0) {
+                newdata <- read_char(con, nbytes)
+                if (length(newdata) > 0) {
+                    nbytes <- nbytes - nchar(newdata, type = "bytes")
+                    data <- paste0(data, newdata)
+                }
+                Sys.sleep(0.01)
+            }
+            data
+        },
+
+        eventloop = function() {
             while (TRUE) {
                 ret <- try({
-                    if (!isOpen(con)) {
-                        self$will_exit <- TRUE
-                    }
+                    self$check_connection()
 
-                    if (.Platform$OS.type == "unix" && getppid() == 1) {
-                        # exit if the current process becomes orphan
-                        self$will_exit <- TRUE
-                    }
-
-                    if (isTRUE(self$will_exit)) {
+                    if (isTRUE(self$exit_flag)) {
                         logger$info("exiting")
                         break
                     }
 
                     self$process_events()
 
-                    if (tcp) {
-                        if (!socketSelect(list(con), timeout = 0)) {
-                            Sys.sleep(0.1)
-                            next
-                        }
-                    }
-                    header <- read_line(con)
-                    if (length(header) == 0 || nchar(header) == 0) {
+                    nbytes <- self$read_header()
+                    if (is.null(nbytes)) {
                         Sys.sleep(0.1)
                         next
                     }
-                    logger$info("received: ", header)
-
-                    matches <- stringr::str_match(header, "Content-Length: ([0-9]+)")
-                    if (is.na(matches[2]))
-                        stop("Unexpected input: ", header)
-
-                    empty_line <- read_line(con)
-                    while (length(empty_line) == 0) {
-                        empty_line <- read_line(con)
-                        Sys.sleep(0.05)
-                    }
-                    if (nchar(empty_line) > 0)
-                        stop("Unexpected non-empty line")
-                    nbytes <- as.integer(matches[2])
-                    data <- ""
-                    while (nbytes > 0) {
-                        newdata <- read_char(con, nbytes)
-                        if (length(newdata) > 0) {
-                            nbytes <- nbytes - nchar(newdata, type = "bytes")
-                            data <- paste0(data, newdata)
-                        }
-                        Sys.sleep(0.05)
-                    }
+                    data <- self$read_content(nbytes)
                     self$handle_raw(data)
                 })
                 if (inherits(ret, "try-error")) {
@@ -245,7 +257,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
 #' @export
 run <- function(debug = FALSE, host = "localhost", port = NULL) {
     tools::Rd2txt_options(underline_titles = FALSE)
-    logger$set_mode(debug = debug)
+    if (debug) logger$debug_mode()
     langserver <- LanguageServer$new(host, port)
     langserver$run()
 }

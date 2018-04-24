@@ -1,8 +1,14 @@
 # languageserver: An implementation of the Language Server Protocol for R
 
 [![CRAN\_Status\_Badge](http://www.r-pkg.org/badges/version/languageserver)](https://cran.r-project.org/package=languageserver)
+[![](http://cranlogs.r-pkg.org/badges/grand-total/languageserver)](https://cran.r-project.org/package=languageserver)
 
 `languageserver` is an implement of the Microsoft's [Language Server Protocol](https://microsoft.github.io/language-server-protocol) for the language of R.
+
+It is released on CRAN and can be easily installed by
+```
+install.packages("languageserver")
+```
 
 The development version of `languageserver` could be installed by running the following in R
 ```
@@ -43,9 +49,24 @@ let g:LanguageClient_serverCommands = {
 - [ ] workspaceSymbolProvider
 - [ ] codeActionProvider
 - [ ] codeLensProvider
-- [ ] documentFormattingProvider
-- [ ] documentRangeFormattingProvider
+- [x] documentFormattingProvider
+- [x] documentRangeFormattingProvider
 - [ ] documentOnTypeFormattingProvider
 - [ ] renameProvider
 - [ ] documentLinkProvider
 - [ ] executeCommandProvider
+
+
+## Diagnostics settings
+
+User can specify the default linters in `.Rprofile`. Please note that this setting
+is ignored if a `.lintr` file is found.
+
+```r
+options(languageserver.default_linters = lintr::with_defaults(
+    line_length_linter = lintr::line_length_linter(100),
+    object_length_linter = NULL,
+    object_name_linter = NULL,
+    commented_code_linter = NULL
+))
+```

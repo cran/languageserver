@@ -27,8 +27,12 @@ Namespace <- R6::R6Class("Namespace",
             pkgname <- self$package_name
             ns <- asNamespace(pkgname)
             fn <- get(fname, envir = ns)
-            sig <- capture.output(str(fn))
-            paste(trimws(sig, which = "left"), collapse = "")
+            if (is.primitive(fn)) {
+                NULL
+            } else {
+                sig <- capture.output(str(fn))
+                paste(trimws(sig, which = "left"), collapse = "")
+            }
         },
 
         get_formals = function(fname) {
@@ -115,20 +119,17 @@ Workspace <- R6::R6Class("Workspace",
 #'
 #' internal use only
 #' @param uri the file path
-#' @param document the content of the file
+#' @param lintfile the actual file to lint
+#' @param run_lintr set \code{FALSE} to disable lintr diagnostics
 #' @export
-workspace_sync <- function(uri, document) {
-    use_temp_file <- !is.null(document)
+workspace_sync <- function(uri, lintfile = NULL, run_lintr = TRUE) {
     packages <- character(0)
 
-    if (use_temp_file) {
-        lintfile <- tempfile(fileext = ".R")
-        write(document, file = lintfile)
-    } else {
+    if (is.null(lintfile)) {
         lintfile <- path_from_uri(uri)
-        document <- readLines(lintfile)
+        document <- readLines(lintfile, warn = FALSE)
 
-        # only check for packages when opening and saving files, i.e., when document is NULL
+        # only check for packages when opening and saving files, i.e., when lintfile is NULL
         # TODO: check DESCRIPTION of an R Package
 
         result <- stringr::str_match_all(document, "^(?:library|require)\\(['\"]?(.*?)['\"]?\\)")
@@ -140,71 +141,84 @@ workspace_sync <- function(uri, document) {
 
     }
 
-    diagnostics <- tryCatch({
-        diagnose_file(lintfile)
-    }, error = function(e) NULL)
-
-    if (use_temp_file) file.remove(lintfile)
+    if (run_lintr) {
+        diagnostics <- tryCatch({
+            diagnose_file(lintfile)
+        }, error = function(e) NULL)
+    } else {
+        diagnostics <- NULL
+    }
 
     list(packages = packages, diagnostics = diagnostics)
 }
 
-process_sync_input_queue <- function(self) {
-    sync_input_queue <- self$sync_input_queue
-    sync_output_queue <- self$sync_output_queue
+process_sync_input_dict <- function(self) {
+    sync_input_dict <- self$sync_input_dict
+    sync_output_dict <- self$sync_output_dict
 
-    for (i in seq_len(sync_input_queue$size())) {
-        qinput <- sync_input_queue$get()
-        uri <- qinput$id
-        document <- qinput$item
-
-        if (sync_output_queue$has(uri)) {
-            qoutput <- sync_output_queue$get(uri)
-            process <- qoutput$item
-            try({
-                if (process$is_alive()) {
-                    process$kill()
-                }
-            })
+    for (uri in sync_input_dict$keys()) {
+        if (sync_output_dict$has(uri)) {
+            item <- sync_output_dict$pop(uri)
+            process <- item$process
+            if (process$is_alive()) try(process$kill())
+            lintfile <- item$lintfile
+            if (!is.null(lintfile) && file.exists(lintfile)) {
+                file.remove(lintfile)
+            }
         }
-        sync_output_queue$put(
+
+        document <- sync_input_dict$pop(uri)
+        if (is.null(document)) {
+            lintfile <- NULL
+        } else {
+            lintfile <- tempfile(fileext = ".R")
+            write(document, file = lintfile)
+        }
+
+        sync_output_dict$set(
             uri,
-            callr::r_bg(
-                function(uri, document) {
-                    languageserver::workspace_sync(uri, document)
-                },
-                list(uri = uri, document = document)
+            list(
+                process = callr::r_bg(
+                    function(uri, lintfile, run_lintr) {
+                        languageserver::workspace_sync(uri, lintfile, run_lintr)
+                    },
+                    list(uri = uri, lintfile = lintfile, run_lintr = self$run_lintr),
+                    system_profile = TRUE, user_profile = TRUE
+                ),
+                lintfile = lintfile
             )
         )
     }
 }
 
-process_sync_output_queue <- function(self) {
-    for (i in seq_len(self$sync_output_queue$size())) {
-        q <- self$sync_output_queue$get()
-        uri <- q$id
-        p <- q$item
+process_sync_output_dict <- function(self) {
+    for (uri in self$sync_output_dict$keys()) {
+        item <- self$sync_output_dict$get(uri)
+        process <- item$process
 
-        if (!is.null(p)) {
-            if (p$is_alive()) {
-                self$sync_output_queue$put(uri, p)
-            } else {
-                result <- p$get_result()
-                diagnostics <- result$diagnostics
-                if (!is.null(diagnostics)) {
-                    self$deliver(
-                        Notification$new(
-                            method = "textDocument/publishDiagnostics",
-                            params = list(
-                                uri = uri,
-                                diagnostics = diagnostics
-                            )
+        if (!is.null(process) && !process$is_alive()) {
+            result <- process$get_result()
+            diagnostics <- result$diagnostics
+            if (!is.null(diagnostics)) {
+                self$deliver(
+                    Notification$new(
+                        method = "textDocument/publishDiagnostics",
+                        params = list(
+                            uri = uri,
+                            diagnostics = diagnostics
                         )
                     )
-                }
-                for (package in result$packages) {
-                    self$workspace$load_package(package)
-                }
+                )
+            }
+            for (package in result$packages) {
+                self$workspace$load_package(package)
+            }
+
+            # cleanup
+            self$sync_output_dict$remove(uri)
+            lintfile <- item$lintfile
+            if (!is.null(lintfile) && file.exists(lintfile)) {
+                file.remove(lintfile)
             }
         }
     }

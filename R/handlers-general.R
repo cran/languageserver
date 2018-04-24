@@ -17,13 +17,13 @@ on_initialized <- function(self, params) {
 
 # Request
 on_shutdown <- function(self, id, params) {
-    self$will_exit <- TRUE
+    self$exit_flag <- TRUE
     self$deliver(Response$new(id = id, result = list()))
 }
 
 # Notification
 on_exit <- function(self, params) {
-    self$will_exit <- TRUE
+    self$exit_flag <- TRUE
 }
 
 # Notification

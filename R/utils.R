@@ -1,3 +1,26 @@
+is_directory <- function (filename) {
+    is_dir <- file.info(filename)$isdir
+    !is.na(is_dir) && is_dir
+}
+
+find_package <- function (path = getwd()) {
+    start_path <- getwd()
+    on.exit(setwd(start_path))
+    if (!file.exists(path)) {
+        return(NULL)
+    }
+    setwd(path)
+    prev_path <- ""
+    while (!file.exists(file.path(prev_path, "DESCRIPTION"))) {
+        if (identical(prev_path, getwd())) {
+            return(NULL)
+        }
+        prev_path <- getwd()
+        setwd("..")
+    }
+    normalizePath(prev_path)
+}
+
 read_char <- function(con, n) {
     if (.Platform$OS.type == "windows" && "file" %in% class(con)) {
         .Call("stdin_read_char", PACKAGE = "languageserver", n)
@@ -85,17 +108,15 @@ log_write <- function(..., file = stderr()){
 
 Logger <- R6::R6Class("Logger",
     public = list(
-        debug = NULL,
-        set_mode = function(debug) {
-            self$debug <- debug
+        debug_mode = function() {
+            self$info <- function(...) {
+                        log_write(...)
+                    }
         },
-        error = function(...){
+        error = function(...) {
             log_write(...)
         },
-        info = function(...){
-            if (self$debug) {
-                log_write(...)
-            }
+        info = function(...) {
         }
     )
 )
