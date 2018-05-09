@@ -1,4 +1,5 @@
 #' @useDynLib languageserver
+#' @importFrom R6 R6Class
 #' @details
 #' An implementation of the Language Server Protocol for R
 "_PACKAGE"
@@ -63,6 +64,11 @@ LanguageServer <- R6::R6Class("LanguageServer",
         deliver = function(message) {
             if (!is.null(message)) {
                 cat(message$format(), file = self$outputcon)
+                if ("Notification" %in% class(message)) {
+                    logger$info("deliver method: ", message$method)
+                } else {
+                    logger$info("deliver id: ", message$id)
+                }
             }
         },
 
@@ -156,8 +162,8 @@ LanguageServer <- R6::R6Class("LanguageServer",
 
         process_reply_queue = function() {
             while (self$reply_queue$size() > 0) {
-                notification <- self$reply_queue$pop()
-                self$deliver(notification)
+                reply <- self$reply_queue$pop()
+                self$deliver(reply)
             }
         },
 
@@ -172,10 +178,25 @@ LanguageServer <- R6::R6Class("LanguageServer",
             }
         },
 
+        read_line = function() {
+            if (self$tcp) {
+                readLines(self$inputcon, n = 1)
+            } else {
+                .Call("stdin_read_line", PACKAGE = "languageserver")
+            }
+        },
+
+        read_char = function(n) {
+            if (self$tcp) {
+                readChar(self$inputcon, n)
+            } else {
+                .Call("stdin_read_char", PACKAGE = "languageserver", n)
+            }
+        },
+
         read_header = function() {
-            con <- self$inputcon
-            if (self$tcp && !socketSelect(list(con), timeout = 0)) return(NULL)
-            header <- read_line(con)
+            if (self$tcp && !socketSelect(list(self$inputcon), timeout = 0)) return(NULL)
+            header <- self$read_line()
             if (length(header) == 0 || nchar(header) == 0) return(NULL)
 
             logger$info("received: ", header)
@@ -186,17 +207,16 @@ LanguageServer <- R6::R6Class("LanguageServer",
         },
 
         read_content = function(nbytes) {
-            con <- self$inputcon
-            empty_line <- read_line(con)
+            empty_line <- self$read_line()
             while (length(empty_line) == 0) {
-                empty_line <- read_line(con)
+                empty_line <- self$read_line()
                 Sys.sleep(0.01)
             }
             if (nchar(empty_line) > 0)
                 stop("Unexpected non-empty line")
             data <- ""
             while (nbytes > 0) {
-                newdata <- read_char(con, nbytes)
+                newdata <- self$read_char(nbytes)
                 if (length(newdata) > 0) {
                     nbytes <- nbytes - nchar(newdata, type = "bytes")
                     data <- paste0(data, newdata)
