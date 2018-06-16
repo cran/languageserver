@@ -24,35 +24,25 @@ CompletionItemKind <- list(
 
 package_completion <- function(token) {
     installed_packages <- rownames(utils::installed.packages())
-    completions <- list()
-
-    for (package in installed_packages) {
-        if (startsWith(package, token)) {
-            completions <- append(completions, list(list(
-                label = package,
-                kind = CompletionItemKind$Module
-            )))
-        }
-    }
+    token_packages <- installed_packages[startsWith(installed_packages, token)]
+    completions <- lapply(token_packages, function(package) {
+        list(label = package, kind = CompletionItemKind$Module)
+    })
     completions
 }
 
 arg_completion <- function(workspace, token, closure) {
-    completions <- list()
-
-    args <- workspace$get_formals(closure$funct, closure$package)
-    for (arg in names(args)) {
-        if (startsWith(arg, token)) {
-            completions <- append(completions, list(list(
-                label = arg,
-                kind = CompletionItemKind$Variable
-            )))
-        }
+    args <- names(workspace$get_formals(closure$funct, closure$package))
+    if (is.character(args)) {
+        token_args <- args[startsWith(args, token)]
+        completions <- lapply(token_args, function(arg) {
+            list(label = arg, kind = CompletionItemKind$Variable)
+        })
+        completions
     }
-    completions
 }
 
-workspace_complection <- function(workspace, full_token) {
+workspace_completion <- function(workspace, full_token) {
     completions <- list()
 
     matches <- stringr::str_match(
@@ -71,35 +61,30 @@ workspace_complection <- function(workspace, full_token) {
     if (is.na(pkg) || exported_only) {
         for (nsname in packages) {
             ns <- workspace$get_namespace(nsname)
-            for (object in ns$functs) {
-                if (startsWith(object, token)) {
-                    completions <- append(completions, list(list(
-                        label = object,
-                        kind = CompletionItemKind$Function,
-                        detail = paste0("{", nsname, "}")
-                    )))
-                }
-            }
-            for (object in ns$nonfuncts) {
-                if (startsWith(object, token)) {
-                    completions <- append(completions, list(list(
-                        label = object,
-                        kind = CompletionItemKind$Field,
-                        detail = paste0("{", nsname, "}")
-                    )))
-                }
-            }
+            functs <- ns$functs[startsWith(ns$functs, token)]
+            functs_completions <- lapply(functs, function(object) {
+                list(label = object,
+                     kind = CompletionItemKind$Function,
+                     detail = paste0("{", nsname, "}"))
+            })
+            nonfuncts <- ns$nonfuncts[startsWith(ns$nonfuncts, token)]
+            nonfuncts_completions <- lapply(nonfuncts, function(object) {
+                list(label = object,
+                     kind = CompletionItemKind$Field,
+                     detail = paste0("{", nsname, "}"))
+            })
+            completions <- c(completions,
+                functs_completions,
+                nonfuncts_completions)
         }
     } else {
         ns <- workspace$get_namespace(pkg)
-        for (object in ns$unexports) {
-            if (startsWith(object, token)) {
-                completions <- append(completions, list(list(
-                    label = object,
-                    detail = paste0("{", pkg, "}")
-                )))
-            }
-        }
+        unexports <- ns$unexports[startsWith(ns$unexports, token)]
+        unexports_completion <- lapply(unexports, function(object) {
+            list(label = object,
+                 detail = paste0("{", pkg, "}"))
+        })
+        completions <- c(completions, unexports_completion)
     }
 
     completions
@@ -120,11 +105,11 @@ completion_reply <- function(id, uri, workspace, document, position) {
 
     completions <- list()
 
-    if (nchar(token) > 0) {
+    if (nzchar(token)) {
         completions <- c(
             completions,
             package_completion(token),
-            workspace_complection(workspace, token))
+            workspace_completion(workspace, token))
     }
 
     if (length(closure) > 0) {

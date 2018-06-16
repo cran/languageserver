@@ -30,8 +30,9 @@ Namespace <- R6::R6Class("Namespace",
             if (is.primitive(fn)) {
                 NULL
             } else {
-                sig <- capture.output(str(fn))
-                paste(trimws(sig, which = "left"), collapse = "")
+                sig <- capture.output(print(args(fn)))
+                sig <- sig[1:length(sig) - 1]
+                trimws(sig, which = "left")
             }
         },
 
@@ -134,7 +135,7 @@ Workspace <- R6::R6Class("Workspace",
                 hfile <- utils::help((topic), (pkg))
             }
             if (length(hfile) > 0) {
-                repr::repr_text(hfile)
+                enc2utf8(repr::repr_text(hfile))
             } else {
                 NULL
             }
