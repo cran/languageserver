@@ -6,12 +6,26 @@ if (.Platform$OS.type == "windows") {
             utils::URLdecode(substr(uri, 9, nchar(uri)))
         }
     }
+    path_to_uri <- function(path) {
+        if (is.null(path)) {
+            NULL
+        } else {
+            paste0("file:///", utils::URLencode(path))
+        }
+    }
 } else {
     path_from_uri <- function(uri) {
         if (is.null(uri)) {
             NULL
         } else {
             utils::URLdecode(substr(uri, 8, nchar(uri)))
+        }
+    }
+    path_to_uri <- function(path) {
+        if (is.null(path)) {
+            NULL
+        } else {
+            paste0("file://", utils::URLencode(path))
         }
     }
 }
@@ -56,7 +70,7 @@ detect_closure <- function(document, line, character) {
 
         closure <- stringr::str_match(
             trim_content,
-            "(?:([a-zA-Z][a-zA-Z0-9]+):::?)?([a-zA-Z.][a-zA-Z0-9_.]*)\\($")
+            "(?:([a-zA-Z][a-zA-Z0-9.]+):::?)?([a-zA-Z.][a-zA-Z0-9_.]*)\\($")
 
         if (is.na(closure[2])) {
             list(funct = closure[3])
@@ -82,7 +96,7 @@ detect_hover <- function(document, line, character) {
     content <- document_line(document, line + 1)
     first <- stringr::str_match(
         substr(content, 1, character),
-        "(?:([a-zA-Z][a-zA-Z0-9]+):::?)?([a-zA-Z.][a-zA-Z0-9_.]*)$")[1]
+        "(?:([a-zA-Z][a-zA-Z0-9.]+):::?)?([a-zA-Z.][a-zA-Z0-9_.]*)$")[1]
     second <- stringr::str_match(
         substr(content, character + 1, nchar(content)),
         "^[a-zA-Z0-9_.]+\\b")[1]

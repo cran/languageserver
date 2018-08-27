@@ -21,6 +21,10 @@ find_package <- function(path = getwd()) {
     normalizePath(prev_path)
 }
 
+is_package <- function(rootUri) {
+    file.exists(file.path(path_from_uri(rootUri), "DESCRIPTION"))
+}
+
 stdin_read_char <- function(n) {
     .Call("stdin_read_char", PACKAGE = "languageserver", n)
 }
@@ -45,6 +49,11 @@ leisurize <- function(fun, t = 1) {
 
 sanitize_names <- function(objects) {
     objects[stringr::str_detect(objects, "^(?:[a-zA-Z.][a-zA-Z0-9_.]*)?$")]
+}
+
+merge_list <- function(x, y) {
+  x[names(y)] <- y
+  x
 }
 
 to_string <- function(...) {

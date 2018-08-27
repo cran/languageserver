@@ -1,7 +1,6 @@
 Namespace <- R6::R6Class("Namespace",
     public = list(
         package_name = NULL,
-        objects = NULL,
         exports = NULL,
         unexports = NULL,
         functs = NULL,
@@ -10,9 +9,9 @@ Namespace <- R6::R6Class("Namespace",
         initialize = function(pkgname) {
             self$package_name <- pkgname
             ns <- asNamespace(pkgname)
-            self$objects <- sanitize_names(objects(ns))
+            objects <- sanitize_names(objects(ns))
             self$exports <- sanitize_names(getNamespaceExports(ns))
-            self$unexports <- setdiff(self$objects, self$exports)
+            self$unexports <- setdiff(objects, self$exports)
             isf <- sapply(self$exports, function(x) {
                         is.function(get(x, envir = ns))})
             self$functs <- self$exports[isf]
@@ -30,9 +29,9 @@ Namespace <- R6::R6Class("Namespace",
             if (is.primitive(fn)) {
                 NULL
             } else {
-                sig <- capture.output(print(args(fn)))
+                sig <- utils::capture.output(print(args(fn)))
                 sig <- sig[1:length(sig) - 1]
-                trimws(sig, which = "left")
+                paste0(trimws(sig, which = "left"), collapse = "\n")
             }
         },
 
@@ -53,6 +52,7 @@ Workspace <- R6::R6Class("Workspace",
     public = list(
         loaded_packages = c("base", "stats", "methods", "utils", "graphics", "grDevices"),
         namespaces = list(),
+        global_env = list(),
 
         initialize = function() {
             for (pkgname in self$loaded_packages) {
@@ -84,7 +84,9 @@ Workspace <- R6::R6Class("Workspace",
         },
 
         get_namespace = function(pkg) {
-            if (pkg %in% names(self$namespaces)) {
+            if (pkg == "_workspace_") {
+                self$global_env
+            } else if (pkg %in% names(self$namespaces)) {
                 self$namespaces[[pkg]]
             } else {
                 self$namespaces[[pkg]] <- Namespace$new(pkg)
@@ -94,6 +96,9 @@ Workspace <- R6::R6Class("Workspace",
 
         get_signature = function(funct, pkg = NULL) {
             if (is.null(pkg)) {
+                if (funct %in% names(self$global_env$signatures)) {
+                    return(self$global_env$signatures[funct])
+                }
                 pkg <- self$guess_package(funct)
             }
             if (is.null(pkg)) {
@@ -111,6 +116,9 @@ Workspace <- R6::R6Class("Workspace",
 
         get_formals = function(funct, pkg = NULL) {
             if (is.null(pkg)) {
+                if (funct %in% names(self$global_env$formals)) {
+                    return(self$global_env$formals[funct])
+                }
                 pkg <- self$guess_package(funct)
             }
             if (is.null(pkg)) {
@@ -139,6 +147,13 @@ Workspace <- R6::R6Class("Workspace",
             } else {
                 NULL
             }
+        },
+
+        load_to_global = function(nonfuncts, functs, signatures, formals) {
+            self$global_env$nonfuncts <- unique(c(self$global_env$nonfuncts, nonfuncts))
+            self$global_env$functs <- unique(c(self$global_env$functs, functs))
+            self$global_env$signatures <- merge_list(self$global_env$signatures, signatures)
+            self$global_env$formals <- merge_list(self$global_env$formals, formals)
         }
     )
 )
@@ -146,49 +161,82 @@ Workspace <- R6::R6Class("Workspace",
 #' Determine workspace information for a given file
 #'
 #' internal use only
-#' @param uri the file path
+#' @param uri the file uri
+#' @param temp_file the file to lint, determine from \code{uri} if \code{NULL}
 #' @param run_lintr set \code{FALSE} to disable lintr diagnostics
-#' @param parse_file set \code{FALSE} to disable lintr diagnostics
-#' @param temp_file the actual file to lint
+#' @param parse set \code{FALSE} to disable parsing file
 #' @export
-workspace_sync <- function(uri, run_lintr = TRUE, parse_file = FALSE, temp_file = NULL) {
+workspace_sync <- function(uri, temp_file = NULL, run_lintr = TRUE, parse = FALSE) {
     packages <- character(0)
+    functs <- character()
+    nonfuncts <- character()
+    formals <- list()
+    signatures <- list()
 
-    if (parse_file) {
-        if (is.null(temp_file)) {
-            temp_file <- path_from_uri(uri)
-        }
-        document <- readLines(temp_file, warn = FALSE)
+    if (is.null(temp_file)) {
+        path <- path_from_uri(uri)
+    } else {
+        path <- temp_file
+    }
 
-        # only check for packages when saving files, i.e., when temp_file is NULL
-        # TODO: check DESCRIPTION of an R Package
+    if (parse) {
+        expr <- tryCatch(parse(path, keep.source = FALSE), error = function(e) NULL)
+        if (length(expr)) {
+            for (e in expr) {
+                if (length(e) == 3L &&
+                        is.symbol(e[[1L]]) &&
+                        (e[[1L]] == "<-" || e[[1L]] == "=") &&
+                        is.symbol(e[[2L]])) {
+                    symbol <- as.character(e[[2L]])
+                    objects <- c(objects, symbol)
+                    if (is.call(e[[3L]]) && e[[3L]][[1L]] == "function") {
+                        functs <- c(functs, symbol)
+                        func <- e[[3L]]
+                        formals[[symbol]] <- func[[2L]]
+                        signature <- func
+                        signature[[3L]] <- quote(expr =)
+                        signature <- utils::capture.output(print(signature))
+                        signature <- paste0(trimws(signature, which = "left"), collapse = "\n")
+                        signatures[[symbol]] <- signature
+                    } else {
+                        nonfuncts <- c(nonfuncts, symbol)
+                    }
+                } else if (length(e) == 2L &&
+                            is.symbol(e[[1L]]) &&
+                            (e[[1L]] == "library" || e[[1L]] == "require")) {
 
-        result <- stringr::str_match_all(document, "^(?:library|require)\\(['\"]?(.*?)['\"]?\\)")
-        for (j in seq_along(result)) {
-            if (nrow(result[[j]]) >= 1) {
-                packages <- append(packages, result[[j]][1, 2])
+                    packages <- c(packages, as.character(e[[2L]]))
+                }
             }
         }
-
     }
 
     if (run_lintr) {
-        diagnostics <- tryCatch(diagnose_file(temp_file), error = function(e) NULL)
+        diagnostics <- tryCatch(diagnose_file(path), error = function(e) NULL)
     } else {
         diagnostics <- NULL
     }
 
-    list(packages = packages, diagnostics = diagnostics)
+    list(packages = packages,
+         nonfuncts = nonfuncts, functs = functs, signatures = signatures, formals = formals,
+         diagnostics = diagnostics)
 }
 
 process_sync_input_dict <- function(self) {
     sync_input_dict <- self$sync_input_dict
     sync_output_dict <- self$sync_output_dict
 
-    for (uri in sync_input_dict$keys()) {
+    uris <- sync_input_dict$keys()
+    # avoid heavy cpu usage
+    if (length(uris) > 8) {
+        uris <- uris[1:8]
+    }
+    for (uri in uris) {
+        parse <- FALSE
         if (sync_output_dict$has(uri)) {
             item <- sync_output_dict$pop(uri)
             process <- item$process
+            parse <- item$parse
             if (process$is_alive()) try(process$kill())
             temp_file <- item$temp_file
             if (!is.null(temp_file) && file.exists(temp_file)) {
@@ -196,14 +244,15 @@ process_sync_input_dict <- function(self) {
             }
         }
 
-        document <- sync_input_dict$pop(uri)
-        if (isTRUE(document)) {
-            parse_file <- TRUE
+        item <- sync_input_dict$pop(uri)
+        run_lintr <- item$run_lintr && self$run_lintr
+        parse <- parse || item$parse
+        doc <- item$document
+        if (is.null(doc)) {
             temp_file <- NULL
         } else {
-            parse_file <- FALSE
             temp_file <- tempfile(fileext = ".R")
-            write(document, file = temp_file)
+            write(item$document, file = temp_file)
         }
 
         sync_output_dict$set(
@@ -213,11 +262,13 @@ process_sync_input_dict <- function(self) {
                     function(...) languageserver::workspace_sync(...),
                     list(
                         uri = uri,
-                        run_lintr = self$run_lintr,
-                        parse_file = parse_file,
-                        temp_file = temp_file),
+                        temp_file = temp_file,
+                        run_lintr = run_lintr,
+                        parse = parse
+                    ),
                     system_profile = TRUE, user_profile = TRUE
                 ),
+                parse = parse,
                 temp_file = temp_file
             )
         )
@@ -247,6 +298,9 @@ process_sync_output_dict <- function(self) {
                 logger$info("load package:", package)
                 self$workspace$load_package(package)
             }
+
+            self$workspace$load_to_global(
+                result$nonfunct, result$funct, result$signatures, result$formals)
 
             # cleanup
             self$sync_output_dict$remove(uri)

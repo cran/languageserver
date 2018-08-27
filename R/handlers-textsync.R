@@ -4,7 +4,7 @@ text_document_did_open <- function(self, params) {
     uri <- textDocument$uri
     doc <- readLines(path_from_uri(uri), warn = FALSE)
     self$documents[[uri]] <- doc
-    self$sync_input_dict$set(uri, TRUE)
+    self$sync_input_dict$set(uri, list(document = NULL, run_lintr = TRUE, parse = TRUE))
 }
 
 # Notification
@@ -13,11 +13,18 @@ text_document_did_change <- function(self, params) {
     contentChanges <- params$contentChanges
     text <- contentChanges[[1]]$text
     uri <- textDocument$uri
-    doc <- stringr::str_split(text, "\n")[[1]]
+    logger$info("did change: ", uri)
+    doc <- stringr::str_split(text, "\r\n|\n")[[1]]
     # remove last empty line
     if (nchar(doc[[length(doc)]]) == 0) doc <- doc[-length(doc)]
     self$documents[[uri]] <- doc
-    self$sync_input_dict$set(uri, doc)
+    if (self$sync_input_dict$has(uri)) {
+        # make sure we do not accidentially override list call with `parse = FALSE`
+        item <- self$sync_input_dict$pop(uri)
+        self$sync_input_dict$set(uri, list(document = doc, run_lintr = TRUE, parse = item$parse))
+    } else {
+        self$sync_input_dict$set(uri, list(document = doc, run_lintr = TRUE, parse = FALSE))
+    }
 }
 
 # Notification
@@ -31,7 +38,7 @@ text_document_did_save <- function(self, params) {
     uri <- textDocument$uri
     logger$info("did save:", uri)
     self$documents[[uri]] <- readLines(path_from_uri(uri), warn = FALSE)
-    self$sync_input_dict$set(uri, TRUE)
+    self$sync_input_dict$set(uri, list(document = NULL, run_lintr = TRUE, parse = TRUE))
 }
 
 # Notification

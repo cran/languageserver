@@ -46,7 +46,7 @@ workspace_completion <- function(workspace, full_token) {
     completions <- list()
 
     matches <- stringr::str_match(
-        full_token, "(?:([a-zA-Z][a-zA-Z0-9]+)(:::?))?([a-zA-Z0-9_.]*)$")
+        full_token, "(?:([a-zA-Z][a-zA-Z0-9.]+)(:::?))?([a-zA-Z0-9_.]*)$")
 
     pkg <- matches[2]
     exported_only <- matches[3] == "::"
@@ -59,19 +59,24 @@ workspace_completion <- function(workspace, full_token) {
     }
 
     if (is.na(pkg) || exported_only) {
-        for (nsname in packages) {
+        for (nsname in c("_workspace_", packages)) {
             ns <- workspace$get_namespace(nsname)
             functs <- ns$functs[startsWith(ns$functs, token)]
+            if (nsname == "_workspace_") {
+                tag <- "[workspace]"
+            } else {
+                tag <- paste0("{", nsname, "}")
+            }
             functs_completions <- lapply(functs, function(object) {
                 list(label = object,
                      kind = CompletionItemKind$Function,
-                     detail = paste0("{", nsname, "}"))
+                     detail = tag)
             })
             nonfuncts <- ns$nonfuncts[startsWith(ns$nonfuncts, token)]
             nonfuncts_completions <- lapply(nonfuncts, function(object) {
                 list(label = object,
                      kind = CompletionItemKind$Field,
-                     detail = paste0("{", nsname, "}"))
+                     detail = tag)
             })
             completions <- c(completions,
                 functs_completions,
