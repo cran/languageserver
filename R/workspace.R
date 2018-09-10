@@ -52,7 +52,10 @@ Workspace <- R6::R6Class("Workspace",
     public = list(
         loaded_packages = c("base", "stats", "methods", "utils", "graphics", "grDevices"),
         namespaces = list(),
-        global_env = list(),
+        global_env = list(nonfuncts = character(0),
+                          functs = character(0),
+                          signatures = list(),
+                          formals = list()),
 
         initialize = function() {
             for (pkgname in self$loaded_packages) {
@@ -62,9 +65,9 @@ Workspace <- R6::R6Class("Workspace",
 
         load_package = function(pkgname) {
             if (!(pkgname %in% self$loaded_packages)) {
-                ns <- try(self$get_namespace(pkgname), silent = TRUE)
+                ns <- tryCatch(self$get_namespace(pkgname), error = function(e) NULL)
                 logger$info("ns: ", ns)
-                if (!inherits(ns, "try-error")) {
+                if (!is.null(ns)) {
                     self$loaded_packages <- append(self$loaded_packages, pkgname)
                     logger$info("loaded_packages: ", self$loaded_packages)
                 }
@@ -96,8 +99,8 @@ Workspace <- R6::R6Class("Workspace",
 
         get_signature = function(funct, pkg = NULL) {
             if (is.null(pkg)) {
-                if (funct %in% names(self$global_env$signatures)) {
-                    return(self$global_env$signatures[funct])
+                if (funct %in% self$global_env$functs) {
+                    return(self$global_env$signatures[[funct]])
                 }
                 pkg <- self$guess_package(funct)
             }
@@ -116,8 +119,8 @@ Workspace <- R6::R6Class("Workspace",
 
         get_formals = function(funct, pkg = NULL) {
             if (is.null(pkg)) {
-                if (funct %in% names(self$global_env$formals)) {
-                    return(self$global_env$formals[funct])
+                if (funct %in% self$global_env$functs) {
+                    return(self$global_env$formals[[funct]])
                 }
                 pkg <- self$guess_package(funct)
             }
@@ -149,14 +152,19 @@ Workspace <- R6::R6Class("Workspace",
             }
         },
 
-        load_to_global = function(nonfuncts, functs, signatures, formals) {
-            self$global_env$nonfuncts <- unique(c(self$global_env$nonfuncts, nonfuncts))
-            self$global_env$functs <- unique(c(self$global_env$functs, functs))
-            self$global_env$signatures <- merge_list(self$global_env$signatures, signatures)
-            self$global_env$formals <- merge_list(self$global_env$formals, formals)
+        load_to_global = function(parse_result) {
+            self$global_env$nonfuncts <- unique(
+                c(self$global_env$nonfuncts, parse_result$nonfuncts))
+            self$global_env$functs <- unique(
+                c(self$global_env$functs, parse_result$functs))
+            self$global_env$signatures <- merge_list(
+                self$global_env$signatures, parse_result$signatures)
+            self$global_env$formals <- merge_list(
+                self$global_env$formals, parse_result$formals)
         }
     )
 )
+
 
 #' Determine workspace information for a given file
 #'
@@ -167,12 +175,6 @@ Workspace <- R6::R6Class("Workspace",
 #' @param parse set \code{FALSE} to disable parsing file
 #' @export
 workspace_sync <- function(uri, temp_file = NULL, run_lintr = TRUE, parse = FALSE) {
-    packages <- character(0)
-    functs <- character()
-    nonfuncts <- character()
-    formals <- list()
-    signatures <- list()
-
     if (is.null(temp_file)) {
         path <- path_from_uri(uri)
     } else {
@@ -180,35 +182,9 @@ workspace_sync <- function(uri, temp_file = NULL, run_lintr = TRUE, parse = FALS
     }
 
     if (parse) {
-        expr <- tryCatch(parse(path, keep.source = FALSE), error = function(e) NULL)
-        if (length(expr)) {
-            for (e in expr) {
-                if (length(e) == 3L &&
-                        is.symbol(e[[1L]]) &&
-                        (e[[1L]] == "<-" || e[[1L]] == "=") &&
-                        is.symbol(e[[2L]])) {
-                    symbol <- as.character(e[[2L]])
-                    objects <- c(objects, symbol)
-                    if (is.call(e[[3L]]) && e[[3L]][[1L]] == "function") {
-                        functs <- c(functs, symbol)
-                        func <- e[[3L]]
-                        formals[[symbol]] <- func[[2L]]
-                        signature <- func
-                        signature[[3L]] <- quote(expr =)
-                        signature <- utils::capture.output(print(signature))
-                        signature <- paste0(trimws(signature, which = "left"), collapse = "\n")
-                        signatures[[symbol]] <- signature
-                    } else {
-                        nonfuncts <- c(nonfuncts, symbol)
-                    }
-                } else if (length(e) == 2L &&
-                            is.symbol(e[[1L]]) &&
-                            (e[[1L]] == "library" || e[[1L]] == "require")) {
-
-                    packages <- c(packages, as.character(e[[2L]]))
-                }
-            }
-        }
+        parse_result <- tryCatch(parse_document(path), error = function(e) NULL)
+    } else {
+        parse_result <- NULL
     }
 
     if (run_lintr) {
@@ -217,34 +193,33 @@ workspace_sync <- function(uri, temp_file = NULL, run_lintr = TRUE, parse = FALS
         diagnostics <- NULL
     }
 
-    list(packages = packages,
-         nonfuncts = nonfuncts, functs = functs, signatures = signatures, formals = formals,
-         diagnostics = diagnostics)
+    list(parse_result = parse_result, diagnostics = diagnostics)
 }
 
-process_sync_input_dict <- function(self) {
-    sync_input_dict <- self$sync_input_dict
-    sync_output_dict <- self$sync_output_dict
 
-    uris <- sync_input_dict$keys()
+process_sync_in <- function(self) {
+    sync_in <- self$sync_in
+    sync_out <- self$sync_out
+
+    uris <- sync_in$keys()
     # avoid heavy cpu usage
     if (length(uris) > 8) {
         uris <- uris[1:8]
     }
     for (uri in uris) {
         parse <- FALSE
-        if (sync_output_dict$has(uri)) {
-            item <- sync_output_dict$pop(uri)
+        if (sync_out$has(uri)) {
+            item <- sync_out$pop(uri)
             process <- item$process
             parse <- item$parse
-            if (process$is_alive()) try(process$kill())
+            if (process$is_alive()) try(process$kill(), silent = TRUE)
             temp_file <- item$temp_file
             if (!is.null(temp_file) && file.exists(temp_file)) {
                 file.remove(temp_file)
             }
         }
 
-        item <- sync_input_dict$pop(uri)
+        item <- sync_in$pop(uri)
         run_lintr <- item$run_lintr && self$run_lintr
         parse <- parse || item$parse
         doc <- item$document
@@ -255,7 +230,7 @@ process_sync_input_dict <- function(self) {
             write(item$document, file = temp_file)
         }
 
-        sync_output_dict$set(
+        sync_out$set(
             uri,
             list(
                 process = callr::r_bg(
@@ -275,14 +250,14 @@ process_sync_input_dict <- function(self) {
     }
 }
 
-process_sync_output_dict <- function(self) {
-    for (uri in self$sync_output_dict$keys()) {
-        item <- self$sync_output_dict$get(uri)
+process_sync_out <- function(self) {
+    for (uri in self$sync_out$keys()) {
+        item <- self$sync_out$get(uri)
         process <- item$process
 
         if (!is.null(process) && !process$is_alive()) {
-            result <- process$get_result()
-            diagnostics <- result$diagnostics
+            process_result <- process$get_result()
+            diagnostics <- process_result$diagnostics
             if (!is.null(diagnostics)) {
                 self$deliver(
                     Notification$new(
@@ -294,16 +269,18 @@ process_sync_output_dict <- function(self) {
                     )
                 )
             }
-            for (package in result$packages) {
-                logger$info("load package:", package)
-                self$workspace$load_package(package)
+            parse_result <- process_result$parse_result
+            if (!is.null(parse_result)) {
+                for (package in parse_result$packages) {
+                    logger$info("load package:", package)
+                    self$workspace$load_package(package)
+                }
+
+                self$workspace$load_to_global(parse_result)
             }
 
-            self$workspace$load_to_global(
-                result$nonfunct, result$funct, result$signatures, result$formals)
-
             # cleanup
-            self$sync_output_dict$remove(uri)
+            self$sync_out$remove(uri)
             temp_file <- item$temp_file
             if (!is.null(temp_file) && file.exists(temp_file)) {
                 file.remove(temp_file)

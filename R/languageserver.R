@@ -22,10 +22,10 @@ LanguageServer <- R6::R6Class("LanguageServer",
         rootUri = NULL,
         rootPath = NULL,
         initializationOptions = NULL,
-        capabilities = NULL,
+        ClientCapabilities = NULL,
 
-        sync_input_dict = NULL,
-        sync_output_dict = NULL,
+        sync_in = NULL,
+        sync_out = NULL,
         reply_queue = NULL,
 
         initialize = function(host, port) {
@@ -48,13 +48,13 @@ LanguageServer <- R6::R6Class("LanguageServer",
             self$register_handlers()
 
             self$workspace <- Workspace$new()
-            self$sync_input_dict <- OrderedDictL$new()
-            self$sync_output_dict <- OrderedDictL$new()
-            self$reply_queue <- QueueL$new()
+            self$sync_in <- collections::OrderedDictL$new()
+            self$sync_out <- collections::OrderedDictL$new()
+            self$reply_queue <- collections::QueueL$new()
 
-            self$process_sync_input_dict <- leisurize(
-                function() process_sync_input_dict(self), 0.3)
-            self$process_sync_output_dict <- (function() process_sync_output_dict(self))
+            self$process_sync_in <- leisurize(
+                function() process_sync_in(self), 0.3)
+            self$process_sync_out <- (function() process_sync_out(self))
         },
 
         finalize = function() {
@@ -64,23 +64,24 @@ LanguageServer <- R6::R6Class("LanguageServer",
         deliver = function(message) {
             if (!is.null(message)) {
                 cat(message$format(), file = self$outputcon)
-                if ("Notification" %in% class(message)) {
-                    logger$info("deliver method: ", message$method)
-                } else {
-                    logger$info("deliver id: ", message$id)
+                logger$info("deliver: ", class(message))
+                method <- message$method
+                if (!is.null(method)) {
+                    logger$info("method: ", method)
                 }
             }
         },
 
         handle_raw = function(data) {
-            tryCatch({
-                payload <- jsonlite::fromJSON(data, simplifyVector = FALSE)
-                pl_names <- names(payload)
-                logger$info("received payload.")
-            },
-            error = function(e){
-                logger$error("error handling json: ", e)
-            })
+            payload <- tryCatch(
+                jsonlite::fromJSON(data, simplifyVector = FALSE),
+                error = function(e) e)
+            if (inherits(payload, "error")) {
+                logger$error("error handling json: ", payload)
+                return(NULL)
+            }
+            pl_names <- names(payload)
+            logger$info("received payload.")
             if ("id" %in% pl_names && "method" %in% pl_names) {
                 self$handle_request(payload)
             } else if ("method" %in% pl_names) {
@@ -128,37 +129,26 @@ LanguageServer <- R6::R6Class("LanguageServer",
             }
         },
 
-        register_handlers = function() {
-            self$request_handlers <- list(
-                initialize = on_initialize,
-                shutdown = on_shutdown,
-                `textDocument/completion` =  text_document_completion,
-                `textDocument/hover` = text_document_hover,
-                `textDocument/signatureHelp` = text_document_signature_help,
-                `textDocument/formatting` = text_document_formatting,
-                `textDocument/rangeFormatting` = text_document_range_formatting
-            )
-
-            self$notification_handlers <- list(
-                initialized = on_initialized,
-                exit = on_exit,
-                `textDocument/didOpen` = text_document_did_open,
-                `textDocument/didChange` = text_document_did_change,
-                `textDocument/didSave` = text_document_did_save,
-                `textDocument/didClose` = text_document_did_close,
-                `workspace/didChangeConfiguration` = workspace_did_change_configuration
-            )
-        },
-
         process_events = function() {
-            self$process_sync_input_dict()
-            self$process_sync_output_dict()
+            self$process_sync_in()
+            self$process_sync_out()
             self$process_reply_queue()
         },
 
-        process_sync_input_dict = NULL,
+        text_sync = function(uri, document = NULL, run_lintr = TRUE, parse = TRUE) {
+            if (self$sync_in$has(uri)) {
+                # make sure we do not accidentially override list call with `parse = FALSE`
+                item <- self$sync_in$pop(uri)
+                parse <- parse || item$parse
+                run_lintr <- run_lintr || item$run_lintr
+            }
+            self$sync_in$set(
+                uri, list(document = document, run_lintr = run_lintr, parse = parse))
+        },
 
-        process_sync_output_dict = NULL,
+        process_sync_in = NULL,
+
+        process_sync_out = NULL,
 
         process_reply_queue = function() {
             while (self$reply_queue$size() > 0) {
@@ -245,7 +235,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
                     }
                     data <- self$read_content(nbytes)
                     self$handle_raw(data)
-                })
+                }, silent = TRUE)
                 if (inherits(ret, "try-error")) {
                     logger$error(ret)
                     logger$error(as.list(traceback()))
@@ -261,9 +251,32 @@ LanguageServer <- R6::R6Class("LanguageServer",
     )
 )
 
+LanguageServer$set("public", "register_handlers", function() {
+    self$request_handlers <- list(
+        initialize = on_initialize,
+        shutdown = on_shutdown,
+        `textDocument/completion` =  text_document_completion,
+        `textDocument/hover` = text_document_hover,
+        `textDocument/signatureHelp` = text_document_signature_help,
+        `textDocument/formatting` = text_document_formatting,
+        `textDocument/rangeFormatting` = text_document_range_formatting
+    )
+
+    self$notification_handlers <- list(
+        initialized = on_initialized,
+        exit = on_exit,
+        `textDocument/didOpen` = text_document_did_open,
+        `textDocument/didChange` = text_document_did_change,
+        `textDocument/didSave` = text_document_did_save,
+        `textDocument/didClose` = text_document_did_close,
+        `workspace/didChangeConfiguration` = workspace_did_change_configuration
+    )
+})
+
 
 #' Run the R language server
-#' @param debug set \code{TRUE} to show debug information in stderr
+#' @param debug set \code{TRUE} to show debug information in stderr;
+#'              or it could be a character string specifying the log file
 #' @param host the hostname used to create the tcp server, not used when \code{port} is \code{NULL}
 #' @param port the port used to create the tcp server. If \code{NULL}, use stdio instead.
 #' @examples
@@ -278,7 +291,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
 run <- function(debug = FALSE, host = "localhost", port = NULL) {
     tools::Rd2txt_options(underline_titles = FALSE)
     tools::Rd2txt_options(itemBullet = "* ")
-    if (debug) logger$debug_mode()
+    logger$debug_mode(debug)
     langserver <- LanguageServer$new(host, port)
     langserver$run()
 }
