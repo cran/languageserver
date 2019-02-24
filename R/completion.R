@@ -19,7 +19,14 @@ CompletionItemKind <- list(
     Snippet = 15,
     Color = 16,
     File = 17,
-    Reference = 18
+    Reference = 18,
+    Folder = 19,
+    EnumMember = 20,
+    Constant = 21,
+    Struct = 22,
+    Event = 23,
+    Operator = 24,
+    TypeParameter = 25
 )
 
 package_completion <- function(token) {
@@ -100,7 +107,12 @@ completion_reply <- function(id, uri, workspace, document, position) {
     character <- position$character
 
     if (!check_scope(uri, document, line)) {
-        return(Response$new(id))
+        return(Response$new(
+            id,
+            result = list(
+                isIncomplete = FALSE,
+                items = list()
+            )))
     }
 
     token <- detect_token(document, line, character)
@@ -128,7 +140,7 @@ completion_reply <- function(id, uri, workspace, document, position) {
     Response$new(
         id,
         result = list(
-            isIncomplete = TRUE,
+            isIncomplete = FALSE,
             items = completions
         )
     )
