@@ -2,6 +2,7 @@
 
 [![CRAN\_Status\_Badge](http://www.r-pkg.org/badges/version/languageserver)](https://cran.r-project.org/package=languageserver)
 [![](http://cranlogs.r-pkg.org/badges/grand-total/languageserver)](https://cran.r-project.org/package=languageserver)
+[![Build Status](https://travis-ci.org/REditorSupport/languageserver.svg?branch=master)](https://travis-ci.org/REditorSupport/languageserver)
 
 `languageserver` is an implement of the Microsoft's [Language Server Protocol](https://microsoft.github.io/language-server-protocol) for the language of R.
 
@@ -38,10 +39,11 @@ let g:LanguageClient_serverCommands = {
 
 - EMacs: [lsp-mode](https://github.com/emacs-lsp/lsp-mode) with settings
 ```elisp
-(lsp-define-stdio-client lsp-R "R"
-                         (lambda () default-directory)
-			 '("R" "--slave" "-e" "languageserver::run()"))
-(add-hook 'R-mode-hook #'lsp-R-enable)
+(lsp-register-client
+    (make-lsp-client :new-connection
+        (lsp-stdio-connection '("R" "--slave" "-e" "languageserver::run()"))
+        :major-modes '(ess-r-mode inferior-ess-r-mode)
+        :server-id 'lsp-R))
 ```
 
 ## Services Implemented

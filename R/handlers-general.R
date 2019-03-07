@@ -1,3 +1,12 @@
+#' initialize handler
+#'
+#' Handler to the [initialize](https://microsoft.github.io/language-server-protocol/specification#initialize) [Request].
+#'
+#' @template self
+#' @template id
+#' @param params a named list, the `initialize` Request options
+#'
+#'  @keywords internal
 on_initialize <- function(self, id, params) {
     logger$info("initialization config: ", params)
     self$processId <- params$processId
@@ -8,19 +17,27 @@ on_initialize <- function(self, id, params) {
     self$deliver(Response$new(id = id, result = list(capabilities = ServerCapabilities)))
 }
 
-# Notification
+#' initialized handler
+#'
+#' Handler to the [initialized](https://microsoft.github.io/language-server-protocol/specification#initialized) [Notification].
+#'
+#' @template self
+#' @param params a named list
+#'
+#' @keywords internal
 on_initialized <- function(self, params) {
     logger$info("on_initialized")
     if (is_package(self$rootUri)) {
 
-        source_dir <- file.path(path_from_uri(self$rootUri), "R")
+        project_root <- path_from_uri(self$rootUri)
+        source_dir <- file.path(project_root, "R")
         files <- list.files(source_dir)
         for (f in files) {
             logger$info("load ", f)
             uri <- path_to_uri(file.path(source_dir, f))
             self$text_sync(uri, document = NULL, run_lintr = FALSE, parse = TRUE)
         }
-        deps <- tryCatch(desc::desc_get_deps(), error = function(e) NULL)
+        deps <- tryCatch(desc::desc_get_deps(project_root), error = function(e) NULL)
         if (!is.null(deps)) {
             packages <- Filter(function(x) x != "R", deps$package[deps$type == "Depends"])
             for (package in packages) {
@@ -33,18 +50,41 @@ on_initialized <- function(self, params) {
     # lint_result <- lintr::lint_package(rootPath)
 }
 
-# Request
+#' shutdown request handler
+#'
+#' Handler to the [shutdown](https://microsoft.github.io/language-server-protocol/specification#shutdown) [Request]
+#'
+#' @template self
+#' @template id
+#' @param params unused here
+#'
+#' @keywords internal
 on_shutdown <- function(self, id, params) {
     self$exit_flag <- TRUE
     self$deliver(Response$new(id = id, result = list()))
 }
 
-# Notification
+
+#' exit notification handler
+#'
+#' Hanlder to the [exit](https://microsoft.github.io/language-server-protocol/specification#exit) [Notification]
+#'
+#' @template self
+#' @param params unused here
+#'
+#' @keywords internal
 on_exit <- function(self, params) {
     self$exit_flag <- TRUE
 }
 
-# Notification
+#' cancel request notification handler
+#'
+#' Handler to the [cancelRequest](https://microsoft.github.io/language-server-protocol/specification#cancelRequest) [Notification]
+#'
+#' @template self
+#' @param params unused here
+#'
+#' @keywords internal
 cancel_request <- function(self, params) {
 
 }
