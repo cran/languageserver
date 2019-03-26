@@ -1,8 +1,8 @@
 Package: languageserver
 Type: Package
 Title: Language Server Protocol
-Version: 0.2.7
-Date: 2019-3-7
+Version: 0.2.8
+Date: 2019-3-25
 Author: Randy Lai
 Maintainer: Randy Lai <randy.cs.lai@gmail.com>
 Description: An implementation of the Language Server Protocol for R. The Language Server protocol is used by an editor client to integrate features like auto completion. See <https://microsoft.github.io/language-server-protocol> for details.
@@ -17,6 +17,6 @@ LazyData: true
 NeedsCompilation: yes
 ByteCompile: yes
 RoxygenNote: 6.1.1
-Packaged: 2019-03-07 07:38:37 UTC; Randy
+Packaged: 2019-03-26 03:32:29 UTC; randy
 Repository: CRAN
-Date/Publication: 2019-03-07 08:20:03 UTC
+Date/Publication: 2019-03-26 05:20:04 UTC
