@@ -1,4 +1,4 @@
-6b30f1313ba04266e6392251801dd2d5 *DESCRIPTION
+4a0956ede444b3a94573e693cdcf8dfd *DESCRIPTION
 7677fe75c3fe8ad68f755a559fcc82b8 *LICENSE
 1ec58d88c8404066d8820f2c8109e8f9 *NAMESPACE
 93a6283992287ba20d2dca2a70d01e62 *NEWS.md
@@ -10,16 +10,16 @@ bbef23398e54a0b86d16320fc47ee304 *R/formatting.R
 717c198d02e062f0fa84aa712b64c83c *R/handlers-general.R
 f5d913d072a82c7be1a5328172ca866c *R/handlers-langfeatures.R
 23824b7a8e837b359791bb53e3da3ccf *R/handlers-textsync.R
-e20c1d93da8d55ee8e460fe655e16fd9 *R/handlers-workspace.R
-95215f8f2451914f179e252eba5f140f *R/hover.R
+efb14bbe5058cc0e8c1ac42d4f1b0a5a *R/handlers-workspace.R
+63d878beb79ffa799af3f4c69be34f27 *R/hover.R
 751f9ee46771ff349bf0cb67b2a87870 *R/interfaces.R
 2a0e9306d4b7501e59dd8ebfb87c1e67 *R/languageclient.R
 ccfd3e9b425a8f9cd62f652f272b6b81 *R/languageserver.R
 6bd6d03f8691c92f7c311b131837dfd2 *R/protocol.R
 c793e86ef6ce52e86372c2dd18603720 *R/signature.R
-e900a1bee78926a83221e684ca297d8a *R/utils.R
-78c0fa33f005618513cb20d48f33add3 *R/workspace.R
-20eccdccf62567140d0155a66dd4cc8b *README.md
+0b576131e3e0d4a6ac7db6e3e7777824 *R/utils.R
+b92e33322a5496faa084f08b405a332d *R/workspace.R
+f1b2043c85049c821f854b1bb5f30807 *README.md
 f93390207512c616403eec5ad8bd4657 *inst/projects/mypackage/DESCRIPTION
 f4952a5a758aaeaa98846f193e878264 *inst/projects/mypackage/NAMESPACE
 abee8f1a6c46a2a9fc7976cd955dcb7e *inst/projects/mypackage/R/mypackage.R

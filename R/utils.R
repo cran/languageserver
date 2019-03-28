@@ -113,7 +113,7 @@ merge_list <- function(x, y) {
 #' @keywords internal
 to_string <- function(...) {
     dots <- list(...)
-    if (length(str) > 0) {
+    if (length(dots) > 0) {
         str <- sapply(
             dots, function(x) {
                 tryCatch({
@@ -127,7 +127,7 @@ to_string <- function(...) {
     } else {
         str <- ""
     }
-    paste0(paste(str, collapse = ""), "\n")
+    paste0(paste(str, collapse = " "), "\n")
 }
 
 #' write to log
@@ -167,9 +167,9 @@ Logger <- R6::R6Class("Logger",
 )
 
 #' check if a character vector looks like a function
-#' 
+#'
 #' @param text a character vector
-#' 
+#'
 #' @keywords internal
 detect_function <- function(text) {
     matches <- stringr::str_match(text, "(?:([a-zA-Z][a-zA-Z0-9.]+)(:::?))?([a-zA-Z0-9_.]*)$")
