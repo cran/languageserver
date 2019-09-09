@@ -194,7 +194,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
             logger$info("received: ", header)
             matches <- stringr::str_match(header, "Content-Length: ([0-9]+)")
             if (is.na(matches[2]))
-                stop("Unexpected input: ", header)
+                stop(paste0("Unexpected input: ", header))
             as.integer(matches[2])
         },
 
@@ -258,10 +258,13 @@ LanguageServer$set("public", "register_handlers", function() {
         initialize = on_initialize,
         shutdown = on_shutdown,
         `textDocument/completion` =  text_document_completion,
+        `textDocument/definition` = text_document_definition,
         `textDocument/hover` = text_document_hover,
         `textDocument/signatureHelp` = text_document_signature_help,
         `textDocument/formatting` = text_document_formatting,
-        `textDocument/rangeFormatting` = text_document_range_formatting
+        `textDocument/rangeFormatting` = text_document_range_formatting,
+        `textDocument/documentSymbol` = text_document_document_symbol,
+        `workspace/symbol` = workspace_symbol
     )
 
     self$notification_handlers <- list(

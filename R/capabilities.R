@@ -9,7 +9,8 @@
 #' + completionProvider,
 #' + signatureHelpProvider,
 #' + documentFormattingProvider,
-#' + documentRangeFormattingProvider
+#' + documentRangeFormattingProvider,
+#' + definitionProvider
 #' @name ServerCapabilities
 #' @export
 NULL
@@ -63,13 +64,13 @@ ServerCapabilities <- list(
     hoverProvider = TRUE,
     completionProvider = CompletionOptions,
     signatureHelpProvider = SignatureHelpOptions,
-    # definitionProvider = FALSE,
     # typeDefinitionProvider = FALSE,
     # implementationProvider = FALSE,
+    definitionProvider = TRUE,
     # referencesProvider = FALSE
     # documentHighlightProvider = FALSE,
-    # documentSymbolProvider = FALSE,
-    # workspaceSymbolProvider = FALSE,
+    documentSymbolProvider = TRUE,
+    workspaceSymbolProvider = TRUE,
     # codeActionProvider = FALSE,
     # codeLensProvider = CodeLensOptions,
     documentFormattingProvider = TRUE,

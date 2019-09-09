@@ -63,15 +63,16 @@ text_document_signature_help  <- function(self, id, params) {
 #'
 #' Handler to the [textDocument/definition](https://microsoft.github.io/language-server-protocol/specification#textDocument_definition) [Request]
 #'
-#' Not implemented yet.
-#'
 #' @template self
 #' @template id
 #' @template tdpp
 #'
 #' @keywords internal
 text_document_definition  <- function(self, id, params) {
-
+    textDocument <- params$textDocument
+    uri <- textDocument$uri
+    self$deliver(definition_reply(
+            id, uri, self$workspace, self$documents[[uri]], params$position))
 }
 
 #' textDocument/typeDefinition request handler
@@ -138,15 +139,16 @@ text_document_document_highlight  <- function(self, id, params) {
 #'
 #' Handler to the [textDocument/documentSymbol](https://microsoft.github.io/language-server-protocol/specification#textDocument_documentSymbol) [Request]
 #'
-#' Not implemented yet.
-#'
 #' @template self
 #' @template id
 #' @param params a [document_symbol_params] object
 #'
 #' @keywords internal
 text_document_document_symbol  <- function(self, id, params) {
-
+    textDocument <- params$textDocument
+    uri <- textDocument$uri
+    self$deliver(document_symbol_reply(
+            id, uri, self$workspace))
 }
 
 #' textDocument/codeAction request handler
