@@ -6,19 +6,22 @@
 
 #include <unistd.h> /* for getppid */
 
-SEXP do_getppid() {
-    int ppid;
-    ppid = (int) getppid();
-    return Rf_ScalarInteger(ppid);
+static int ppid = -1;
+
+SEXP become_orphan() {
+    if (ppid == -1) {
+        ppid = (int) getppid();
+    }
+    return Rf_ScalarInteger(ppid != (int) getppid());
 }
 #endif
 
 static const R_CallMethodDef CallEntries[] = {
-    {"document_backward_search", (DL_FUNC) &document_backward_search, 5},
+    {"content_backward_search", (DL_FUNC) &content_backward_search, 5},
     {"stdin_read_char", (DL_FUNC) &stdin_read_char, 1},
     {"stdin_read_line", (DL_FUNC) &stdin_read_line},
 #if !defined(_WIN32) && !defined(_WIN64)
-    {"do_getppid", (DL_FUNC) &do_getppid},
+    {"become_orphan", (DL_FUNC) &become_orphan},
 #endif
     {NULL, NULL, 0}
 };

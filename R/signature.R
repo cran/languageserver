@@ -16,22 +16,16 @@ signature_reply <- function(id, uri, workspace, document, position) {
         return(Response$new(id, list(signatures = NULL)))
     }
 
-    closure <- detect_closure(document, position)
+    result <- document$detect_call(position)
 
     SignatureInformation <- list()
     activeSignature <- -1
 
-
-    if (!is.null(closure$funct)) {
-        if (is.null(closure$package)) {
-            sig <- workspace$get_signature(closure$funct)
-        } else {
-            sig <- workspace$get_signature(closure$funct, closure$package)
-        }
-
+    if (nzchar(result$token)) {
+        sig <- workspace$get_signature(result$token, result$package)
         logger$info("sig: ", sig)
         if (!is.null(sig)) {
-            sig <- trimws(gsub("function\\s*", closure$funct, sig))
+            sig <- trimws(gsub("function\\s*", result$token, sig))
             SignatureInformation <- list(list(label = sig))
             activeSignature <- 0
         }

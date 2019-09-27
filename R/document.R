@@ -1,156 +1,167 @@
-#' paths and uris
-#'
-#' @param uri a character, the path to a file in URI format
-path_from_uri <- function(uri) {
-    if (is.null(uri)) {
-        return(NULL)
-    }
-    start_char <- ifelse(.Platform$OS.type == "windows", 9, 8)
-    utils::URLdecode(substr(uri, start_char, nchar(uri)))
-}
+Document <- R6::R6Class(
+    "Document",
+    public = list(
+        uri = NULL,
+        nline = 0,
+        content = NULL,
+        is_rmarkdown = NULL,
 
-#' @param path a character, the path to a file
-#' @rdname path_from_uri
-path_to_uri <- function(path) {
-    if (is.null(path)) {
-        return(NULL)
-    }
-    prefix <- ifelse(.Platform$OS.type == "windows", "file:///", "file://")
-    paste0(prefix, utils::URLencode(path))
-}
+        initialize = function(uri, content = NULL) {
+            self$uri <- uri
+            self$is_rmarkdown <- is_rmarkdown(self$uri)
+            if (!is.null(content)) {
+                self$set(content)
+            }
+        },
 
-#' check if a file is an RMarkdown file
-#'
-#' @template uri
-#'
-#' @return a logical
-is_rmarkdown <- function(uri) {
-    filename <- path_from_uri(uri)
-    endsWith(tolower(filename), "rmd") || endsWith(tolower(filename), "rmarkdown")
-}
+        set = function(content) {
+            # remove last empty line
+            nline <- length(content)
+            if (nline > 0L && !nzchar(content[nline])) {
+                content <- content[-nline]
+                nline <- nline - 1
+            }
+            self$nline <- nline
+            self$content <- content
+        },
 
-#' check if a token is in a R code block in an Rmarkdown file
-#'
-#' In an RMarkdown document, tokens can be either inside an R code block or
-#' in the text. This function will return `FALSE` if the token is in the text
-#' and `TRUE` if it is in a code block. For R scripts, it always returns `TRUE`.
-#'
-#' @template uri
-#' @template document
-#' @template position
-#'
-#' @return a logical
-check_scope <- function(uri, document, position) {
-    if (is_rmarkdown(uri)) {
-        line <- position$line
-        !identical(sum(sapply(document[1:(line + 1)], function(x) startsWith(x, "```"))) %% 2, 0)
-    } else {
-        TRUE
-    }
-}
+        line = function(row) {
+            if (row <= self$nline) self$content[row] else ""
+        },
 
-#' search backwards in a document for a specific character
+        line0 = function(row) {
+            # row is 0-indexed
+            if (row < self$nline) self$content[row + 1] else ""
+        },
+
+        line_substr = function(row, start = 0, end = Inf) {
+            # start and end are based on UTF-16
+            line <- self$line0(row)
+            pos <- code_point_to_unit(line, c(start, end))
+            substr(line, pos[1] + 1, pos[2])
+        },
+
+        find_token = function(row, col, forward = TRUE) {
+            # row and col are 0-indexed
+            text <- self$line0(row)
+            text_after <- substr(text, col + 1, nchar(text))
+
+            # look forward
+            if (forward) {
+                right_token <- look_forward(text_after)$token
+                end <- col + nchar(right_token)
+            } else {
+                right_token <- ""
+                end <- col
+            }
+
+            matches <- look_backward(substr(text, 1, end))
+            return(list(
+                full_token = matches$full_token,
+                right_token = right_token,
+                package = empty_string_to_null(matches$package),
+                accessor = matches$accessor,
+                token = matches$token
+            ))
+        },
+
+        detect_call = function(position) {
+            row <- position$line
+            text <- self$line0(row)
+            column <- code_point_to_unit(text, position$character)
+
+            if (position$character > 0) {
+                loc <- content_backward_search(self$content, row, column - 1, "(")
+            } else {
+                loc <- c(-1, -1)
+            }
+
+            if (loc[1] < 0 || loc[2] < 0)
+                return(list(token = ""))
+
+            result <- self$find_token(loc[1], loc[2], forward = FALSE)
+            logger$info("call:", result)
+
+            list(
+                full_token = result$full_token,
+                package = result$package,
+                accessor = result$accessor,
+                token = result$token
+            )
+        },
+
+        detect_token = function(position, forward = TRUE) {
+            row <- position$line
+            text <- self$line0(row)
+            col <- code_point_to_unit(text, position$character)
+
+            result <- self$find_token(row, col, forward = forward)
+
+            logger$info("token:", result)
+
+            col_end <- position$character + ncodeunit(result$right_token)
+            col_start <- col_end - ncodeunit(result$full_token)
+
+            list(
+                range = range(
+                    start = position(line = row, character = col_start),
+                    end = position(line = row, character = col_end)
+                ),
+                full_token = result$full_token,
+                package = result$package,
+                accessor = result$accessor,
+                token = result$token
+            )
+        }
+    )
+)
+
+
+#' search backwards in a document content for a specific character
 #'
-#' @template document
-#' @template position
+#' @param content a character vector
+#' @param row an 0-indexed integer
+#' @param column an 0-indexed integer
 #' @param char a single character
 #' @param skip_empty_line a logical
 #'
-#' @return a tuple of positive integers, the line and column position of the
+#' @return a tuple of positive integers, the row and column position of the
 #' character if found, otherwise (-1, -1)
-document_backward_search <- function(document, position, char, skip_empty_line = TRUE) {
-    line      <- position$line
-    character <- position$character
-    .Call("document_backward_search", PACKAGE = "languageserver",
-          document, line, character - 1, char, skip_empty_line)
+content_backward_search <- function(content, row, column, char, skip_empty_line = TRUE) {
+    # TODO: adjust for UTF-16
+    .Call("content_backward_search",
+        PACKAGE = "languageserver",
+        content, row, column, char, skip_empty_line
+    )
 }
 
-#' get the contents of a line
-#'
-#' If the line number is higher than the number of lines in the document,
-#' an empty character is returned.
-#'
-#' @template document
-#' @param lineno a numeric, the line number
-#'
-#' @return a character
-document_line <- function(document, lineno) {
-    if (lineno <= length(document)) {
-        line <- document[lineno]
-    } else {
-        line <- ""
-    }
-    line
-}
-
-#' detect if the current position is inside a closure
-#'
-#' @template document
-#' @template position
-detect_closure <- function(document, position) {
-
-    if (position$character > 0 && !is.null(document)) {
-        loc <- document_backward_search(document, position, "(")
-    } else {
-        loc <- c(-1, -1)
-    }
-
-    if (loc[1] >= 0 && loc[2] >= 0) {
-        content <- document_line(document, loc[1] + 1)
-        trim_content <- trimws(substr(content, 1, loc[2] + 1))
-
-        closure <- stringr::str_match(
-            trim_content,
-            "(?:([a-zA-Z][a-zA-Z0-9.]+):::?)?([a-zA-Z.][a-zA-Z0-9_.]*)\\($")
-
-        if (is.na(closure[2])) {
-            list(funct = closure[3])
-        } else {
-            list(package = closure[2], funct = closure[3])
-        }
-    } else {
-        list()
+# The parsing result returned by `parse` is based on number of bytes in UTF-8.
+# Thus the position information is wrong, we need to fix the position afterwards.
+fix_definiation_ranges <- function(env, path) {
+    functs <- names(env$definition_ranges)
+    for (funct in functs) {
+        range <- env$definition_ranges[[funct]]
+        start_text <- readr::read_lines(path, skip = range$start$line, n_max = 1)
+        end_text <- readr::read_lines(path, skip = range$end$line, n_max = 1)
+        start_col <- utf8_to_utf16_code_point(start_text, range$start$character)
+        end_col <- utf8_to_utf16_code_point(end_text, range$end$character)
+        env$definition_ranges[[funct]] <- range(
+            position(range$start$line, start_col),
+            position(range$end$line, end_col)
+        )
     }
 }
 
-#' detect if position contains a valid token
-#'
-#' @template document
-#' @template position
-detect_token <- function(document, position) {
-    line      <- position$line
-    character <- position$character
 
-    content <- document_line(document, line + 1)
-    token <- stringr::str_match(substr(content, 1, character), "\\b[a-zA-Z0-9_.:]+$")[1]
-    if (is.na(token)) {
-        ""
-    } else {
-        token
-    }
-}
-
-#' detect the token at the current position
-#'
-#' @template document
-#' @template position
-detect_hover <- function(document, position) {
-    line      <- position$line
-    character <- position$character
-
-    content <- document_line(document, line + 1)
-    first <- stringr::str_match(
-        substr(content, 1, character),
-        "(?:([a-zA-Z][a-zA-Z0-9.]+):::?)?([a-zA-Z.][a-zA-Z0-9_.]*)$")[1]
-    second <- stringr::str_match(
-        substr(content, character + 1, nchar(content)),
-        "^[a-zA-Z0-9_.]+\\b")[1]
-
-    if (is.na(first)) first <- ""
-    if (is.na(second)) second <- ""
-    list(begin = character - nchar(first),
-         end = character + nchar(second),
-         text = paste0(first, second))
+parse_env <- function() {
+    env <- new.env()
+    env$packages <- character()
+    env$nonfuncts <- character()
+    env$functs <- character()
+    env$formals <- list()
+    env$signatures <- list()
+    env$definition_ranges <- list()
+    env
 }
 
 
@@ -162,76 +173,90 @@ detect_hover <- function(document, position) {
 #' @param path a character, the path to the document
 parse_document <- function(path) {
     temp_file <- NULL
-    if (is_rmarkdown(path)) {
+    on.exit({
+        if (!is.null(temp_file) && file.exists(temp_file)) {
+            file.remove(temp_file)
+        }
+    })
+    is_rmd <- is_rmarkdown(path)
+    if (is_rmd) {
         temp_file <- tempfile(fileext = ".R")
         path <- tryCatch({
             knitr::purl(path, output = temp_file, quiet = TRUE)
-        }, error = function(e) path)
+        },
+        error = function(e) path
+        )
     }
     expr <- tryCatch(parse(path, keep.source = TRUE), error = function(e) NULL)
-    if (!is.null(temp_file) && file.exists(temp_file)) {
-        file.remove(temp_file)
-    }
-    parse_expr(expr)
+    env <- parse_env()
+    parse_expr(expr, env, is_rmd = is_rmd)
+    env$packages <- resolve_package_dependencies(env$packages)
+    fix_definiation_ranges(env, path)
+    env
 }
 
 
-parse_expr <- function(expr) {
-    packages <- character()
-    nonfuncts <- character()
-    functs <- character()
-    formals <- list()
-    signatures <- list()
-    definition_ranges <- list()
-    if (length(expr)) {
-        for (i in seq_along(expr)) {
-            e <- expr[[i]]
-            if (length(e) == 3L &&
-                is.symbol(e[[1L]]) &&
-                (e[[1L]] == "<-" || e[[1L]] == "=") &&
-                is.symbol(e[[2L]])) {
-                funct <- as.character(e[[2L]])
-                objects <- c(objects, funct)
-                if (is.call(e[[3L]]) && e[[3L]][[1L]] == "function") {
-                    functs <- c(functs, funct)
-                    func <- e[[3L]]
-                    formals[[funct]] <- func[[2L]]
-                    signature <- func
-                    signature <- utils::capture.output(print(signature[1:2]))
-                    signature <- paste0(trimws(signature, which = "left"), collapse = "\n")
-                    signature <- trimws(gsub("NULL\\s*$", "", signature))
-                    signatures[[funct]] <- signature
+parse_expr <- function(expr, env, level = 0L, srcref = attr(expr, "srcref"), is_rmd = FALSE) {
+    if (length(expr) == 0L || is.symbol(expr)) {
+          return(env)
+      }
+    for (i in seq_along(expr)) {
+        e <- expr[[i]]
+        if (!is.call(e) || !is.symbol(e[[1L]])) next
+        f <- as.character(e[[1L]])
+        cur_srcref <- if (level == 0L) srcref[[i]] else srcref
+        if (f %in% c("{", "(")) {
+            Recall(e[-1L], env, level + 1L, cur_srcref)
+        } else if (f == "if") {
+            Recall(e[[2L]], env, level + 1L, cur_srcref)
+            Recall(e[[3L]], env, level + 1L, cur_srcref)
+            if (length(e) == 4L) {
+                Recall(e[[4L]], env, level + 1L, cur_srcref)
+            }
+        } else if (f == "for") {
+            if (is.symbol(e[[2L]])) {
+                env$nonfuncts <- c(env$nonfuncts, as.character(e[[2L]]))
+            }
+            Recall(e[[4L]], env, level + 1L, cur_srcref)
+        } else if (f == "while") {
+            Recall(e[[2L]], env, level + 1L, cur_srcref)
+            Recall(e[[3L]], env, level + 1L, cur_srcref)
+        } else if (f == "repeat") {
+            Recall(e[[2L]], env, level + 1L, cur_srcref)
+        } else if (f %in% c("<-", "=") && length(e) == 3L && is.symbol(e[[2L]])) {
+            funct <- as.character(e[[2L]])
+            env$objects <- c(env$objects, funct)
+            if (is.call(e[[3L]]) && e[[3L]][[1L]] == "function") {
+                env$functs <- c(env$functs, funct)
+                func <- e[[3L]]
+                env$formals[[funct]] <- func[[2L]]
+                signature <- func
+                signature <- utils::capture.output(print(signature[1:2]))
+                signature <- paste0(trimws(signature, which = "left"), collapse = "\n")
+                signature <- trimws(gsub("NULL\\s*$", "", signature))
+                env$signatures[[funct]] <- signature
+
+                if (!is_rmd) {
                     # R is 1-indexed, language server is 0-indexed
-                    first_line <- attr(expr, "srcref")[[i]][1] - 1
-                    first_char <- attr(expr, "srcref")[[i]][5] - 1
-                    last_line <- attr(expr, "srcref")[[i]][3] - 1
-                    last_char <- attr(expr, "srcref")[[i]][6] - 1
-                    definition_range <- range(position(first_line, first_char),
-                                        position(last_line, last_char))
-                    definition_ranges[[funct]] <- definition_range
-                } else {
-                    nonfuncts <- c(nonfuncts, funct)
+                    first_line <- cur_srcref[1] - 1
+                    first_char <- cur_srcref[5] - 1
+                    last_line <- cur_srcref[3] - 1
+                    last_char <- cur_srcref[6]
+                    definition_range <- range(
+                        position(first_line, first_char),
+                        position(last_line, last_char)
+                    )
+                    env$definition_ranges[[funct]] <- definition_range
                 }
-            } else if (length(e) == 2L &&
-                       is.symbol(e[[1L]]) &&
-                       (e[[1L]] == "library" || e[[1L]] == "require")) {
-                pkg <- as.character(e[[2L]])
-                packages <- c(packages, pkg)
-                deps <- tryCatch(
-                    callr::r(
-                        function(pkg) {
-                            library(pkg, character.only = TRUE); search() },
-                        list(pkg = pkg)),
-                    error = function(e) NULL)
-                if (!is.null(deps)) {
-                    deps <- deps[startsWith(deps, "package:")]
-                    deps <- gsub("package:", "", deps)
-                    deps <- deps[! deps %in% packages]
-                    packages <- c(packages, deps)
-                }
+            } else {
+                env$nonfuncts <- c(env$nonfuncts, funct)
+            }
+        } else if (f %in% c("library", "require") && length(e) == 2L) {
+            pkg <- as.character(e[[2L]])
+            if (!(pkg %in% env$packages)) {
+                env$packages <- c(env$packages, pkg)
             }
         }
     }
-    list(packages = packages, nonfuncts = nonfuncts, functs = functs,
-         signatures = signatures, formals = formals, definition_ranges = definition_ranges)
+    env
 }

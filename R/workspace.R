@@ -1,65 +1,3 @@
-#' A data structure for package namespaces
-#'
-#' A `Namespace` is initialized with a package name and builds the list of
-#' objects defined in the package namespace.
-#'
-#' @section Methods:
-#' + `exists(objname)`: returns true if `objname` can be found in the Namespace
-#' + `get_signature(funct)`: return the signature of `funct`
-#' + `get_formals(funct)`: return the [base::formals()] of `funct`
-#'
-#' @field objname a character, an object name
-#' @field funct a character, a function name
-Namespace <- R6::R6Class("Namespace",
-    public = list(
-        package_name = NULL,
-        exports = NULL,
-        unexports = NULL,
-        functs = NULL,
-        nonfuncts = NULL,
-
-        initialize = function(pkgname) {
-            self$package_name <- pkgname
-            ns <- asNamespace(pkgname)
-            objects <- sanitize_names(objects(ns))
-            self$exports <- sanitize_names(getNamespaceExports(ns))
-            self$unexports <- setdiff(objects, self$exports)
-            isf <- sapply(self$exports, function(x) {
-                        is.function(get(x, envir = ns))})
-            self$functs <- self$exports[isf]
-            self$nonfuncts <- setdiff(self$exports, self$functs)
-        },
-
-        exists = function(objname) {
-            objname %in% self$exports
-        },
-
-        get_signature = function(funct) {
-            pkgname <- self$package_name
-            ns <- asNamespace(pkgname)
-            fn <- get(funct, envir = ns)
-            if (is.primitive(fn)) {
-                NULL
-            } else {
-                sig <- utils::capture.output(print(args(fn)))
-                sig <- sig[1:length(sig) - 1]
-                paste0(trimws(sig, which = "left"), collapse = "\n")
-            }
-        },
-
-        get_formals = function(funct) {
-            pkgname <- self$package_name
-            ns <- asNamespace(pkgname)
-            fn <- get(funct, envir = ns)
-            formals(fn)
-        },
-
-        print = function() {
-            cat(paste0("Namespace: ", self$package_name))
-        }
-    )
-)
-
 #' A data structure for a session workspace
 #'
 #' A `Workspace` is initialized at the start of a session, when the language
@@ -172,7 +110,7 @@ Workspace <- R6::R6Class("Workspace",
         },
 
         get_help = function(topic, pkgname = NULL) {
-            if (is.null(pkgname) || is.na(pkgname)) {
+            if (is.null(pkgname)) {
                 pkgname <- self$guess_package(topic)
             }
             # note: the parantheses are neccessary
@@ -302,12 +240,8 @@ process_sync_in <- function(self) {
         if (is.null(doc)) {
             temp_file <- NULL
         } else {
-            if (is_rmarkdown(path)) {
-                temp_file <- tempfile(fileext = ".Rmd")
-            } else {
-                temp_file <- tempfile(fileext = ".R")
-            }
-            write(item$document, file = temp_file)
+            temp_file <- tempfile(fileext = if (is_rmarkdown(path)) ".Rmd" else ".R")
+            write(doc$content, file = temp_file)
         }
 
         sync_out$set(
