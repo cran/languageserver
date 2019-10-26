@@ -117,16 +117,11 @@ Document <- R6::R6Class(
 )
 
 
-#' search backwards in a document content for a specific character
-#'
-#' @param content a character vector
-#' @param row an 0-indexed integer
-#' @param column an 0-indexed integer
-#' @param char a single character
-#' @param skip_empty_line a logical
+#' Search backwards in a document content for a specific character
 #'
 #' @return a tuple of positive integers, the row and column position of the
 #' character if found, otherwise (-1, -1)
+#' @keywords internal
 content_backward_search <- function(content, row, column, char, skip_empty_line = TRUE) {
     # TODO: adjust for UTF-16
     .Call("content_backward_search",
@@ -135,16 +130,17 @@ content_backward_search <- function(content, row, column, char, skip_empty_line 
     )
 }
 
+
 # The parsing result returned by `parse` is based on number of bytes in UTF-8.
 # Thus the position information is wrong, we need to fix the position afterwards.
-fix_definiation_ranges <- function(env, path) {
+fix_definition_ranges <- function(env, lines) {
     functs <- names(env$definition_ranges)
     for (funct in functs) {
         range <- env$definition_ranges[[funct]]
-        start_text <- readr::read_lines(path, skip = range$start$line, n_max = 1)
-        end_text <- readr::read_lines(path, skip = range$end$line, n_max = 1)
-        start_col <- utf8_to_utf16_code_point(start_text, range$start$character)
-        end_col <- utf8_to_utf16_code_point(end_text, range$end$character)
+        start_text <- lines[range$start$line + 1]
+        end_text <- lines[range$end$line + 1]
+        start_col <- code_point_to_unit(start_text, range$start$character)
+        end_col <- code_point_to_unit(end_text, range$end$character)
         env$definition_ranges[[funct]] <- range(
             position(range$start$line, start_col),
             position(range$end$line, end_col)
@@ -161,17 +157,19 @@ parse_env <- function() {
     env$formals <- list()
     env$signatures <- list()
     env$definition_ranges <- list()
+    env$xml_file <- NULL
+    env$xml_doc <- NULL
     env
 }
 
 
-#' parse a document
+#' Parse a document
 #'
 #' Build the list of called packages, functions, variables, formals and
 #' signatures in the document in order to add them to the current [Workspace].
 #'
-#' @param path a character, the path to the document
-parse_document <- function(path) {
+#' @keywords internal
+parse_document <- function(path, tmpdir) {
     temp_file <- NULL
     on.exit({
         if (!is.null(temp_file) && file.exists(temp_file)) {
@@ -180,7 +178,7 @@ parse_document <- function(path) {
     })
     is_rmd <- is_rmarkdown(path)
     if (is_rmd) {
-        temp_file <- tempfile(fileext = ".R")
+        temp_file <- tempfile(fileext = ".R", tmpdir = tmpdir)
         path <- tryCatch({
             knitr::purl(path, output = temp_file, quiet = TRUE)
         },
@@ -190,8 +188,13 @@ parse_document <- function(path) {
     expr <- tryCatch(parse(path, keep.source = TRUE), error = function(e) NULL)
     env <- parse_env()
     parse_expr(expr, env, is_rmd = is_rmd)
-    env$packages <- resolve_package_dependencies(env$packages)
-    fix_definiation_ranges(env, path)
+    fix_definition_ranges(env, attr(expr, "srcfile")$lines)
+    env$xml_file <- tryCatch({
+        xml_text <- xmlparsedata::xml_parse_data(expr)
+        xml_file <- tempfile(basename(path), tmpdir = tmpdir, fileext = ".xml")
+        write(xml_text, xml_file)
+        xml_file
+    }, error = function(e) NULL)
     env
 }
 

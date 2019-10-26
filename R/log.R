@@ -1,6 +1,4 @@
-
-
-#' transform any object to a string
+#' Transform any object to a string
 #'
 #' @param ... anything
 #'
@@ -33,17 +31,17 @@ to_string <- function(...) {
     paste0(paste(str, collapse = " "), "\n")
 }
 
-#' write to log
+#' Write to log
 #'
 #' @param ... anything
 #'
 #' @keywords internal
-log_write <- function(..., file = stderr()){
+log_write <- function(..., file = stderr()) {
     # cat(to_string(...), file = "/tmp/rls")
     cat(to_string(...), file = file)
 }
 
-#' a basic logger class
+#' A basic logger class
 #'
 #' @keywords internal
 Logger <- R6::R6Class("Logger",

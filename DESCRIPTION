@@ -1,23 +1,26 @@
-Package: languageserver
 Type: Package
+Package: languageserver
 Title: Language Server Protocol
-Version: 0.3.1
-Date: 2019-9-27
+Version: 0.3.2
+Date: 2019-10-25
 Author: Randy Lai
 Maintainer: Randy Lai <randy.cs.lai@gmail.com>
-Description: An implementation of the Language Server Protocol for R. The Language Server protocol is used by an editor client to integrate features like auto completion. See <https://microsoft.github.io/language-server-protocol> for details.
-URL: https://github.com/REditorSupport/languageserver
+Description: An implementation of the Language Server Protocol for R. The
+    Language Server protocol is used by an editor client to integrate
+    features like auto completion. See
+    <https://microsoft.github.io/language-server-protocol> for details.
 License: MIT + file LICENSE
+URL: https://github.com/REditorSupport/languageserver
 Depends: R (>= 3.4.0)
-Imports: callr (>= 3.0.0), collections, desc, jsonlite, lintr (>=
-        1.0.3), R6, repr, readr, stringr, styler (>= 1.0.2), tools,
-        utils
-Suggests: processx, knitr, magrittr, purrr, fs, withr, testthat
+Imports: callr (>= 3.0.0), collections (>= 0.2.0), desc, jsonlite,
+        lintr (>= 2.0.0), R6, readr, repr, stringr, styler (>= 1.0.2),
+        tools, utils, xml2, xmlparsedata
+Suggests: fs, knitr, magrittr, processx, purrr, testthat, withr
+ByteCompile: yes
 Encoding: UTF-8
 LazyData: true
 NeedsCompilation: yes
-ByteCompile: yes
 RoxygenNote: 6.1.1
-Packaged: 2019-09-27 18:56:33 UTC; randy
+Packaged: 2019-10-25 22:32:06 UTC; randy
 Repository: CRAN
-Date/Publication: 2019-09-27 19:10:02 UTC
+Date/Publication: 2019-10-26 04:40:02 UTC

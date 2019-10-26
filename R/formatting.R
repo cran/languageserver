@@ -1,44 +1,47 @@
-#' style a file
+get_style <- function(options) {
+    style <- getOption("languageserver.formatting_style")
+    if (is.null(style)) {
+        style <- styler::tidyverse_style(indent_by = options$tabSize)
+    } else {
+        style <- style(options)
+    }
+    style
+}
+
+#' Style a file
 #'
 #' This functions formats a document using [styler::style_file()] with the
-#' [styler::tidyverse_style()] style.
+#' specified style.
 #'
-#' @param path file path
-#' @param options a named list of options, with a `tabSize` parameter
-style_file <- function(path, options) {
-    document <- readLines(path, warn = FALSE)
+#' @keywords internal
+style_file <- function(path, style) {
+    document <- readr::read_lines(path)
     if (is_rmarkdown(path)) {
         temp_file <- tempfile(fileext = ".Rmd")
     } else {
         temp_file <- tempfile(fileext = ".R")
     }
-    writeLines(document, temp_file)
+    readr::write_lines(document, temp_file)
     styler::style_file(temp_file,
-        transformers = styler::tidyverse_style(indent_by = options$tabSize)
+        transformers = style
     )
-    contents <- readLines(temp_file, warn = FALSE)
+    contents <- readr::read_lines(temp_file)
     file.remove(temp_file)
     paste(contents, collapse = "\n")
 }
 
 
-#' edit code style
+#' Edit code style
 #'
 #' This functions formats a list of text using [styler::style_text()] with the
-#' [styler::tidyverse_style()] style.
+#' specified style.
 #'
-#' @param text a vector of text
-#' @param options a named list of options, with a `tabSize` parameter
-#' @param scope the scope type used in styler::tidyverse_style
-#' @param indentation amount of whitespaces put at the begining of each line
-style_text <- function(text, options, scope = "tokens", indentation = "") {
+#' @keywords internal
+style_text <- function(text, style, indentation = "") {
     new_text <- tryCatch(
         styler::style_text(
             text,
-            transformers = styler::tidyverse_style(
-                scope = scope,
-                indent_by = options$tabSize
-            )
+            transformers = style
         ),
         error = function(e) e
     )
@@ -50,15 +53,12 @@ style_text <- function(text, options, scope = "tokens", indentation = "") {
 }
 
 
-#' format a document
-#'
-#' @template id
-#' @template uri
-#' @template document
-#' @param options a named list of options, with a `tabSize` parameter
+#' Format a document
+#' @keywords internal
 formatting_reply <- function(id, uri, document, options) {
     # do not use `style_file` because the changes are not necessarily saved on disk.
-    new_text <- style_text(document$content, options)
+    style <- get_style(options)
+    new_text <- style_text(document$content, style)
     if (is.null(new_text)) {
         return(Response$new(id, list()))
     }
@@ -77,13 +77,8 @@ formatting_reply <- function(id, uri, document, options) {
 }
 
 
-#' format a part of a document
-#'
-#' @template id
-#' @template uri
-#' @template document
-#' @param range a [range], the part of the document to format
-#' @param options a named list of options, with a `tabSize` parameter
+#' Format a part of a document
+#' @keywords internal
 range_formatting_reply <- function(id, uri, document, range, options) {
     line1 <- range$start$line
     character1 <- range$start$character
@@ -103,16 +98,16 @@ range_formatting_reply <- function(id, uri, document, range, options) {
         return(Response$new(id, list()))
     }
 
+    style <- get_style(options)
     # check if the selection contains complete lines
     if (character1 != 0 || character2 < ncodeunit(lastline)) {
-        scope <- "line_breaks"
-    } else {
-        scope <- "tokens"
+        # disable assignment operator fix for partial selection
+        style$token$force_assignment_op <- NULL
     }
 
     selection <- document$content[(line1:line2) + 1]
     indentation <- stringr::str_extract(selection[1], "^\\s*")
-    new_text <- style_text(selection, options, scope = scope, indentation = indentation)
+    new_text <- style_text(selection, style, indentation = indentation)
     if (is.null(new_text)) {
         return(Response$new(id, list()))
     }

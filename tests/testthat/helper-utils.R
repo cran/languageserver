@@ -53,7 +53,7 @@ respond <- function(client, method, params, timeout=5, retry=TRUE,
     client$deliver(client$request(method, params), callback = cb)
     while (is.null(storage$result)) {
         if (remaining < 0) {
-            fail("timeout when obtaining response", info = client$read_error())
+            fail("timeout when obtaining response")
             return(NULL)
         }
         data <- client$fetch(blocking = TRUE, timeout = remaining)
@@ -64,7 +64,7 @@ respond <- function(client, method, params, timeout=5, retry=TRUE,
     if (retry && retry_when(result)) {
         remaining <- (start_time + timeout) - Sys.time()
         if (remaining < 0) {
-            fail("timeout when obtaining desired response", info = client$read_error())
+            fail("timeout when obtaining desired response")
             return(NULL)
         }
         return(Recall(client, method, params, remaining, retry, retry_when))

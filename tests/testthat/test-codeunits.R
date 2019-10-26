@@ -1,9 +1,11 @@
 context("Test Multi Bytes Characters")
 
 test_that("Code units are correctly calculated", {
+    skip_on_os("solaris")
     expect_equal(ncodeunit("a"), 1)
     expect_equal(ncodeunit("𐐀"), 2)
     expect_equal(ncodeunit("佢"), 1)
     expect_equal(ncodeunit("𠍲"), 2)
     expect_equal(ncodeunit(c("佢", "𠍲")), c(1, 2))
+    expect_equal(code_point_to_unit("a𐐀c", 0:5), c(0, 1, NA, 2, 3, NA))
 })

@@ -29,11 +29,21 @@ CompletionItemKind <- list(
     TypeParameter = 25
 )
 
-#' complete a package name
-#'
-#' @param token a character, the start of the package name to identify
-#'
-#' @return a list of candidates
+constants <- c("TRUE", "FALSE", "NULL",
+    "NA", "NA_integer_", "NA_real_", "NA_complex_", "NA_character_",
+    "Inf", "NaN")
+
+#' Complete language constants
+#' @keywords internal
+constant_completion <- function(token) {
+    consts <- constants[startsWith(constants, token)]
+    completions <- lapply(consts, function(const) {
+        list(label = const, kind = CompletionItemKind$Constant)
+    })
+}
+
+#' Complete a package name
+#' @keywords internal
 package_completion <- function(token) {
     installed_packages <- rownames(utils::installed.packages())
     token_packages <- installed_packages[startsWith(installed_packages, token)]
@@ -43,14 +53,8 @@ package_completion <- function(token) {
     completions
 }
 
-#' complete a function argument
-#'
-#' @param workspace a [Workspace] object
-#' @param token a character, the start of the argument to identify
-#' @param funct a character, the function name
-#' @param package a character, the optional package name
-#'
-#' @return a list of candidates
+#' Complete a function argument
+#' @keywords internal
 arg_completion <- function(workspace, token, funct, package = NULL) {
     args <- names(workspace$get_formals(funct, package))
     if (is.character(args)) {
@@ -62,26 +66,23 @@ arg_completion <- function(workspace, token, funct, package = NULL) {
     }
 }
 
-#' complete any object in the workspace
-#'
-#' @param workspace a [Workspace] object
-#' @param token a character, the object to identify
-#' @param package a character
-#' @param exported_only a boolean
-#'
-#' @return a list of candidates
+#' Complete any object in the workspace
+#' @keywords internal
 workspace_completion <- function(workspace, token, package = NULL, exported_only = TRUE) {
     completions <- list()
 
     if (is.null(package)) {
-        packages <- workspace$loaded_packages
+        packages <- c("_workspace_", workspace$loaded_packages)
     } else {
         packages <- c(package)
     }
 
     if (is.null(package) || exported_only) {
-        for (nsname in c("_workspace_", packages)) {
+        for (nsname in packages) {
             ns <- workspace$get_namespace(nsname)
+            if (is.null(ns)) {
+                next
+            }
             functs <- ns$functs[startsWith(ns$functs, token)]
             if (nsname == "_workspace_") {
                 tag <- "[workspace]"
@@ -105,27 +106,63 @@ workspace_completion <- function(workspace, token, package = NULL, exported_only
         }
     } else {
         ns <- workspace$get_namespace(package)
-        unexports <- ns$unexports[startsWith(ns$unexports, token)]
-        unexports_completion <- lapply(unexports, function(object) {
-            list(label = object,
-                 detail = paste0("{", package, "}"))
-        })
-        completions <- c(completions, unexports_completion)
+        if (!is.null(ns)) {
+            unexports <- ns$unexports[startsWith(ns$unexports, token)]
+            unexports_completion <- lapply(unexports, function(object) {
+                list(
+                    label = object,
+                    kind = CompletionItemKind$Field,
+                    detail = paste0("{", package, "}")
+                )
+            })
+            completions <- c(completions, unexports_completion)
+        }
     }
 
     completions
 }
 
+find_enclosing_scopes <- function(x, line, col) {
+    xpath <- sprintf("//expr[(@line1 < %d or (@line1 = %d and @col1 <= %d)) and
+        (@line2 > %d or (@line2 = %d and @col2 >= %d))]",
+        line, line, col, line, line, col)
+    xml2::xml_find_all(x, xpath)
+}
 
-#' the response to a textDocument/completion request
-#'
-#' @template id
-#' @template uri
-#' @template workspace
-#' @template document
-#' @template position
-#'
-#' @return a [Response] object
+scope_completion <- function(uri, workspace, token, position) {
+    xml_doc <- workspace$get_parse_data(uri)$xml_doc
+    if (is.null(xml_doc)) {
+        return(list())
+    }
+
+    enclosing_scopes <- find_enclosing_scopes(xml_doc,
+        position$line + 1, position$character + 1)
+
+    symbol_formals <- xml2::xml_text(xml2::xml_find_all(enclosing_scopes,
+        "expr[FUNCTION]/SYMBOL_FORMALS/text()"))
+    left_assign_symbols <- xml2::xml_text(xml2::xml_find_all(enclosing_scopes,
+        "expr/LEFT_ASSIGN/preceding-sibling::expr/SYMBOL/text()"))
+    right_assign_symbols <- xml2::xml_text(xml2::xml_find_all(enclosing_scopes,
+        "expr/RIGHT_ASSIGN/following-sibling::expr/SYMBOL/text()"))
+    equal_assign_symbols <- xml2::xml_text(xml2::xml_find_all(enclosing_scopes,
+        "equal_assign/expr[1]/SYMBOL/text()"))
+    for_symbols <- xml2::xml_text(xml2::xml_find_all(enclosing_scopes,
+        "forcond/SYMBOL/text()"))
+    scope_symbols <- unique(c(symbol_formals, left_assign_symbols,
+        right_assign_symbols, equal_assign_symbols, for_symbols))
+
+    scope_symbols <- scope_symbols[startsWith(scope_symbols, token)]
+    completions <- lapply(scope_symbols, function(symbol) {
+        list(
+            label = symbol,
+            kind = CompletionItemKind$Field,
+            detail = "[scope]"
+        )
+    })
+}
+
+#' The response to a textDocument/completion request
+#' @keywords internal
 completion_reply <- function(id, uri, workspace, document, position) {
     if (!check_scope(uri, document, position)) {
         return(Response$new(
@@ -146,7 +183,9 @@ completion_reply <- function(id, uri, workspace, document, position) {
         if (is.null(package)) {
             completions <- c(
                 completions,
-                package_completion(token))
+                constant_completion(token),
+                package_completion(token),
+                scope_completion(uri, workspace, token, position))
         }
         completions <- c(
             completions,

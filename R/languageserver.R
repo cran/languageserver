@@ -4,9 +4,10 @@
 #' An implementation of the Language Server Protocol for R
 "_PACKAGE"
 
-#' the language server
+#' The language server
 #'
 #' Describe the language server and how it interacts with clients.
+#' @keywords internal
 LanguageServer <- R6::R6Class("LanguageServer",
     inherit = LanguageBase,
     public = list(
@@ -47,23 +48,22 @@ LanguageServer <- R6::R6Class("LanguageServer",
 
             self$inputcon <- inputcon
             self$outputcon <- outputcon
-            self$register_handlers()
-            self$request_callbacks <- collections::Dict$new()
 
             self$workspace <- Workspace$new()
-            self$sync_in <- collections::OrderedDictL$new()
-            self$sync_out <- collections::OrderedDictL$new()
-            self$reply_queue <- collections::QueueL$new()
+            self$sync_in <- collections::OrderedDictL()
+            self$sync_out <- collections::OrderedDictL()
+            self$reply_queue <- collections::QueueL()
 
             self$process_sync_in <- throttle(
                 function() process_sync_in(self), 0.3
             )
             self$process_sync_out <- (function() process_sync_out(self))
+            super$initialize()
         },
 
         finalize = function() {
             close(self$inputcon)
-            self$request_callbacks <- NULL
+            super$finalize()
         },
 
         process_events = function() {
@@ -72,7 +72,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
             self$process_reply_queue()
         },
 
-        text_sync = function(uri, document = NULL, run_lintr = TRUE, parse = TRUE) {
+        text_sync = function(uri, document = NULL, run_lintr = TRUE, parse = TRUE, resolve = TRUE) {
             if (self$sync_in$has(uri)) {
                 # make sure we do not accidentially override list call with `parse = FALSE`
                 item <- self$sync_in$pop(uri)
@@ -80,7 +80,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
                 run_lintr <- run_lintr || item$run_lintr
             }
             self$sync_in$set(
-                uri, list(document = document, run_lintr = run_lintr, parse = parse)
+                uri, list(document = document, run_lintr = run_lintr, parse = parse, resolve = resolve)
             )
         },
 
@@ -100,7 +100,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
                 self$exit_flag <- TRUE
             }
 
-            if (.Platform$OS.type == "unix" && become_orphan()) {
+            if (.Platform$OS.type == "unix" && process_is_detached()) {
                 # exit if the current process becomes orphan
                 self$exit_flag <- TRUE
             }
@@ -112,7 +112,11 @@ LanguageServer <- R6::R6Class("LanguageServer",
 
         read_line = function() {
             if (self$tcp) {
-                readLines(self$inputcon, n = 1)
+                if (socketSelect(list(self$inputcon), timeout = 0)) {
+                    readLines(self$inputcon, n = 1)
+                } else {
+                    character(0)
+                }
             } else {
                 stdin_read_line()
             }
@@ -124,44 +128,6 @@ LanguageServer <- R6::R6Class("LanguageServer",
             } else {
                 stdin_read_char(n)
             }
-        },
-
-        read_header = function() {
-            if (self$tcp && !socketSelect(list(self$inputcon), timeout = 0)) {
-                  return(NULL)
-              }
-            header <- self$read_line()
-            if (length(header) == 0 || !nzchar(header)) {
-                  return(NULL)
-              }
-
-            logger$info("received: ", header)
-            matches <- stringr::str_match(header, "Content-Length: ([0-9]+)")
-            if (is.na(matches[2])) {
-                  stop(paste0("Unexpected input: ", header))
-              }
-            as.integer(matches[2])
-        },
-
-        read_content = function(nbytes) {
-            empty_line <- self$read_line()
-            while (length(empty_line) == 0) {
-                empty_line <- self$read_line()
-                Sys.sleep(0.01)
-            }
-            if (nzchar(empty_line)) {
-                  stop("Unexpected non-empty line")
-              }
-            data <- ""
-            while (nbytes > 0) {
-                newdata <- self$read_char(nbytes)
-                if (length(newdata) > 0) {
-                    nbytes <- nbytes - nchar(newdata, type = "bytes")
-                    data <- paste0(data, newdata)
-                }
-                Sys.sleep(0.01)
-            }
-            data
         },
 
         run = function() {
@@ -182,7 +148,9 @@ LanguageServer <- R6::R6Class("LanguageServer",
                         next
                     }
                     self$handle_raw(data)
-                }, silent = TRUE)
+                },
+                silent = TRUE
+                )
                 if (inherits(ret, "try-error")) {
                     logger$error(ret)
                     logger$error(as.list(traceback()))
