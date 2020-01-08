@@ -28,15 +28,12 @@ on_initialized <- function(self, params) {
         for (f in files) {
             logger$info("load ", f)
             uri <- path_to_uri(file.path(source_dir, f))
-            self$text_sync(uri, document = NULL, run_lintr = FALSE, parse = TRUE)
+            self$text_sync(uri, document = NULL, parse = TRUE)
         }
         deps <- tryCatch(desc::desc_get_deps(project_root), error = function(e) NULL)
         if (!is.null(deps)) {
             packages <- Filter(function(x) x != "R", deps$package[deps$type == "Depends"])
-            for (package in packages) {
-                logger$info("load package:", package)
-                self$workspace$load_package(package)
-            }
+            self$workspace$load_packages(packages)
         }
     }
     # TODO: result lint result of the package
@@ -55,7 +52,7 @@ on_shutdown <- function(self, id, params) {
 
 #' `exit` notification handler
 #'
-#' Hanlder to the `exit` [Notification].
+#' Handler to the `exit` [Notification].
 #' @keywords internal
 on_exit <- function(self, params) {
     self$exit_flag <- TRUE

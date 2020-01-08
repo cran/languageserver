@@ -36,6 +36,23 @@ test_that("Simple completion works", {
     expect_length(result$items %>% keep(~.$label == ".Machine"), 1)
 })
 
+test_that("Completion of function arguments works", {
+    skip_on_cran()
+    client <- language_client()
+
+    withr::local_tempfile(c("temp_file"), fileext = ".R")
+    writeLines(
+        c(
+            "str(obj"
+        ),
+        temp_file)
+
+    client %>% did_save(temp_file)
+
+    result <- client %>% respond_completion(temp_file, c(0, 6))
+    arg_items <- result$items %>% keep(~.$label == "object")
+    expect_length(arg_items, 1)
+})
 
 test_that("Completion of user function works", {
     skip_on_cran()
@@ -75,4 +92,64 @@ test_that("Completion inside a package works", {
         retry_when = function(result) length(result) == 0 || length(result$items) == 0)
 
     expect_length(result$items %>% keep(~.$label == "nothing"), 1)
+})
+
+test_that("Completion item resolve works", {
+    skip_on_cran()
+    client <- language_client()
+
+    withr::local_tempfile(c("temp_file"), fileext = ".R")
+    writeLines(
+        c(
+            "bas", # package: base
+            "mtcars", # lazydata: mtcars
+            "basename", # function: basename
+            "basename(path", # function paraemter
+            ".Mac" # non-functon: .Machine
+        ),
+        temp_file)
+
+    client %>% did_save(temp_file)
+
+    result <- client %>% respond_completion(temp_file, c(0, 2))
+    items <- result$items %>% keep(~.$label == "base")
+    # normally, we should do `expect_length(items, 1)`, but a bad interaction betwen
+    # packrat and callr could result in two `base` namespaces
+    # https://github.com/r-lib/callr/issues/131
+    expect_gt(length(items), 0)
+    resolve_result <- client %>% respond_completion_item_resolve(items[[1]])
+    expect_equal(resolve_result$documentation$kind, "markdown")
+    expect_equal(resolve_result$documentation$value, "**The R Base Package**\n\nBase R functions.")
+
+    result <- client %>% respond_completion(temp_file, c(1, 5))
+    items <- result$items %>% keep(~.$label == "mtcars")
+    expect_length(items, 1)
+    resolve_result <- client %>% respond_completion_item_resolve(items[[1]])
+    expect_equal(resolve_result$documentation$kind, "markdown")
+    expect_match(resolve_result$documentation$value,
+        "The data was extracted from the 1974 Motor Trend US magazine")
+
+    result <- client %>% respond_completion(temp_file, c(2, 7))
+    items <- result$items %>% keep(~ .$label == "basename")
+    expect_length(items, 1)
+    resolve_result <- client %>% respond_completion_item_resolve(items[[1]])
+    expect_equal(resolve_result$documentation$kind, "markdown")
+    expect_match(resolve_result$documentation$value,
+        "`basename` removes all of the path up to and including the last path separator")
+
+    result <- client %>% respond_completion(temp_file, c(3, 12))
+    items <- result$items %>% keep(~ .$label == "path")
+    expect_length(items, 1)
+    resolve_result <- client %>% respond_completion_item_resolve(items[[1]])
+    expect_equal(resolve_result$documentation$kind, "markdown")
+    expect_match(resolve_result$documentation$value,
+        "character vector, containing path names.")
+
+    result <- client %>% respond_completion(temp_file, c(4, 3))
+    items <- result$items %>% keep(~ .$label == ".Machine")
+    expect_length(items, 1)
+    resolve_result <- client %>% respond_completion_item_resolve(items[[1]])
+    expect_equal(resolve_result$documentation$kind, "markdown")
+    expect_match(resolve_result$documentation$value,
+        "`.Machine` is a variable holding information on the numerical characteristics of the machine \\*\\*R\\*\\* is running on")
 })

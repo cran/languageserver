@@ -1,5 +1,6 @@
 suppressPackageStartupMessages({
     library(magrittr)
+    library(mockery)
     library(purrr)
     library(fs)
 })
@@ -7,12 +8,16 @@ suppressPackageStartupMessages({
 # a hack to make withr::defer_parent to work, see https://github.com/r-lib/withr/issues/123
 defer <- withr::defer
 
-language_client <- function(working_dir = getwd(), debug = FALSE) {
+language_client <- function(working_dir = getwd(), debug = FALSE, diagnostics = FALSE) {
     client <- LanguageClient$new(
-        file.path(R.home("bin"), "R"), c("--slave", "-e", "languageserver::run(debug=TRUE)"))
+        file.path(R.home("bin"), "R"), c("--slave", "-e", "languageserver::run()"))
 
     client$notification_handlers <- list(
-        `textDocument/publishDiagnostics` = function(...) {}
+        `textDocument/publishDiagnostics` = function(self, params) {
+            uri <- params$uri
+            diagnostics <- params$diagnostics
+            self$diagnostics$set(uri, diagnostics)
+        }
     )
 
     client$start(working_dir = working_dir)
@@ -21,13 +26,42 @@ language_client <- function(working_dir = getwd(), debug = FALSE) {
     data <- client$fetch(blocking = TRUE)
     client$handle_raw(data)
     client %>% notify("initialized")
-    withr::defer_parent(client$stop())
+    client %>% notify(
+        "workspace/didChangeConfiguration", list(settings = list(diagnostics = diagnostics)))
+    withr::defer_parent({
+        if (Sys.getenv("R_COVR", "") == "true") {
+            # it is necessary to shutdown the server in covr
+            # we skip this for other times for speed
+            client %>% respond("shutdown", NULL, retry = FALSE)
+            client$process$wait()
+        } else {
+            client$stop()
+        }
+    })
     client
 }
 
 
 notify <- function(client, method, params = NULL) {
     client$deliver(Notification$new(method, params))
+    invisible(client)
+}
+
+
+did_open <- function(client, path) {
+    text <- paste0(readr::read_lines(path), collapse = "\n")
+    notify(
+        client,
+        "textDocument/didOpen",
+        list(
+            textDocument = list(
+                uri = path_to_uri(path),
+                languageId = "R",
+                version = 1,
+                text = text
+            )
+        )
+    )
     invisible(client)
 }
 
@@ -41,17 +75,26 @@ did_save <- function(client, path) {
 }
 
 
-respond <- function(client, method, params, timeout=5, retry=TRUE,
+respond <- function(client, method, params, timeout, retry=TRUE,
                             retry_when = function(result) length(result) == 0) {
-    storage <- new.env()
+    if (missing(timeout)) {
+        if (Sys.getenv("R_COVR", "") == "true") {
+            # we give more time to covr
+            timeout <- 30
+        } else {
+            timeout <- 10
+        }
+    }
+    storage <- new.env(parent = .GlobalEnv)
     cb <- function(self, result) {
+        storage$done <- TRUE
         storage$result <- result
     }
 
     start_time <- Sys.time()
     remaining <- timeout
     client$deliver(client$request(method, params), callback = cb)
-    while (is.null(storage$result)) {
+    while (!isTRUE(storage$done)) {
         if (remaining < 0) {
             fail("timeout when obtaining response")
             return(NULL)
@@ -80,6 +123,15 @@ respond_completion <- function(client, path, pos, ...) {
         list(
             textDocument = list(uri = path_to_uri(path)),
             position = list(line = pos[1], character = pos[2])),
+        ...
+    )
+}
+
+respond_completion_item_resolve <- function(client, params, ...) {
+    respond(
+        client,
+        "completionItem/resolve",
+        params,
         ...
     )
 }
@@ -139,4 +191,32 @@ respond_range_formatting <- function(client, path, start_pos, end_pos, ...) {
             options = list(tabSize = 4, insertSpaces = TRUE)),
         ...
     )
+}
+
+
+wait_for <- function(client, method, timeout = 5) {
+    storage <- new.env(parent = .GlobalEnv)
+    start_time <- Sys.time()
+    remaining <- timeout
+
+    original_handler <- client$notification_handlers[[method]]
+    on.exit({
+        client$notification_handlers[[method]] <- original_handler
+    })
+    client$notification_handlers[[method]] <- function(self, params) {
+        storage$params <- params
+        original_handler(self, params)
+    }
+
+    while (remaining > 0) {
+        data <- client$fetch(blocking = TRUE, timeout = remaining)
+        if (!is.null(data)) {
+            client$handle_raw(data)
+            if (hasName(storage, "params")) {
+                return(storage$params)
+            }
+        }
+        remaining <- (start_time + timeout) - Sys.time()
+    }
+    NULL
 }

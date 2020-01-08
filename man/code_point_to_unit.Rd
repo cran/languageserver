@@ -2,16 +2,16 @@
 % Please edit documentation in R/utils.R
 \name{code_point_to_unit}
 \alias{code_point_to_unit}
-\title{Determinal code units given code points}
+\title{Determine code units given code points}
 \usage{
 code_point_to_unit(line, pts)
 }
 \arguments{
 \item{line}{a character of text}
 
-\item{pts}{0-indexed code points}
+\item{units}{0-indexed code units}
 }
 \description{
-Determinal code units given code points
+Determine code units given code points
 }
 \keyword{internal}

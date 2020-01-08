@@ -5,8 +5,9 @@
 text_document_completion  <- function(self, id, params) {
     textDocument <- params$textDocument
     uri <- textDocument$uri
-    self$deliver(completion_reply(
-        id, uri, self$workspace, self$documents[[uri]], params$position))
+    document <- self$documents[[uri]]
+    point <- document$from_lsp_position(params$position)
+    self$deliver(completion_reply(id, uri, self$workspace, document, point))
 }
 
 #' `completionItem/resolve` request handler
@@ -14,7 +15,8 @@ text_document_completion  <- function(self, id, params) {
 #' Handler to the `completionItem/resolve` [Request].
 #' @keywords internal
 completion_item_resolve  <- function(self, id, params) {
-
+    self$deliver(completion_item_resolve_reply(
+        id, self$workspace, params))
 }
 
 #' `textDocument/hover` request handler
@@ -25,8 +27,9 @@ completion_item_resolve  <- function(self, id, params) {
 text_document_hover  <- function(self, id, params) {
     textDocument <- params$textDocument
     uri <- textDocument$uri
-    self$deliver(hover_reply(
-        id, uri, self$workspace, self$documents[[uri]], params$position))
+    document <- self$documents[[uri]]
+    point <- document$from_lsp_position(params$position)
+    self$deliver(hover_reply(id, uri, self$workspace, document, point))
 }
 
 #' `textDocument/signatureHelp` request handler
@@ -37,8 +40,9 @@ text_document_hover  <- function(self, id, params) {
 text_document_signature_help  <- function(self, id, params) {
     textDocument <- params$textDocument
     uri <- textDocument$uri
-    self$deliver(signature_reply(
-        id, uri, self$workspace, self$documents[[uri]], params$position))
+    document <- self$documents[[uri]]
+    point <- document$from_lsp_position(params$position)
+    self$deliver(signature_reply(id, uri, self$workspace, document, point))
 }
 
 #' `textDocument/definition` request handler
@@ -48,8 +52,9 @@ text_document_signature_help  <- function(self, id, params) {
 text_document_definition  <- function(self, id, params) {
     textDocument <- params$textDocument
     uri <- textDocument$uri
-    self$deliver(definition_reply(
-            id, uri, self$workspace, self$documents[[uri]], params$position))
+    document <- self$documents[[uri]]
+    point <- document$from_lsp_position(params$position)
+    self$deliver(definition_reply(id, uri, self$workspace, document, point))
 }
 
 #' `textDocument/typeDefinition` request handler
@@ -82,7 +87,11 @@ text_document_references  <- function(self, id, params) {
 #' Handler to the `textDocument/documentHighlight` [Request].
 #' @keywords internal
 text_document_document_highlight  <- function(self, id, params) {
-
+    textDocument <- params$textDocument
+    uri <- textDocument$uri
+    document <- self$documents[[uri]]
+    point <- document$from_lsp_position(params$position)
+    self$deliver(document_highlight_reply(id, uri, self$workspace, document, point))
 }
 
 #' `textDocument/documentSymbol` request handler
@@ -92,8 +101,7 @@ text_document_document_highlight  <- function(self, id, params) {
 text_document_document_symbol  <- function(self, id, params) {
     textDocument <- params$textDocument
     uri <- textDocument$uri
-    self$deliver(document_symbol_reply(
-            id, uri, self$workspace))
+    self$deliver(document_symbol_reply(id, uri, self$workspace))
 }
 
 #' `textDocument/codeAction` request handler
@@ -171,9 +179,13 @@ text_document_formatting  <- function(self, id, params) {
 text_document_range_formatting  <- function(self, id, params) {
     textDocument <- params$textDocument
     uri <- textDocument$uri
-    range <- params$range
+    document <- self$documents[[uri]]
+    range <- list(
+        start = document$from_lsp_position(params$range$start),
+        end = document$from_lsp_position(params$range$end)
+    )
     options <- params$options
-    self$deliver(range_formatting_reply(id, uri, self$documents[[uri]], range, options))
+    self$deliver(range_formatting_reply(id, uri, document, range, options))
 }
 
 

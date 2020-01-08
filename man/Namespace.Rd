@@ -3,13 +3,12 @@
 \docType{data}
 \name{Namespace}
 \alias{Namespace}
-\title{A data structure for package namespaces}
-\format{An object of class \code{R6ClassGenerator} of length 24.}
+\title{A class for storing package information}
+\format{An object of class \code{R6ClassGenerator} of length 25.}
 \usage{
 Namespace
 }
 \description{
-A \code{Namespace} is initialized with a package name and builds the list of
-objects defined in the package namespace.
+A class for storing package information
 }
 \keyword{internal}

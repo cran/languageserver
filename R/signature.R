@@ -4,23 +4,35 @@
 #' (as with [base::args()]).
 #'
 #' @keywords internal
-signature_reply <- function(id, uri, workspace, document, position) {
+signature_reply <- function(id, uri, workspace, document, point) {
 
-    if (!check_scope(uri, document, position)) {
+    if (!check_scope(uri, document, point)) {
         return(Response$new(id, list(signatures = NULL)))
     }
 
-    result <- document$detect_call(position)
+    result <- document$detect_call(point)
 
     SignatureInformation <- list()
     activeSignature <- -1
 
     if (nzchar(result$token)) {
-        sig <- workspace$get_signature(result$token, result$package)
+        sig <- workspace$get_signature(result$token, result$package,
+            exported_only = result$accessor != ":::")
         logger$info("sig: ", sig)
         if (!is.null(sig)) {
-            sig <- trimws(gsub("function\\s*", result$token, sig))
-            SignatureInformation <- list(list(label = sig))
+            doc <- workspace$get_documentation(result$token, result$package, isf = TRUE)
+            doc_string <- ""
+            if (is.character(doc)) {
+                doc_string <- doc
+            } else if (is.list(doc) && is.character(doc$description)) {
+                doc_string <- doc$description
+            }
+            documentation <- list(kind = "markdown", value = doc_string)
+
+            SignatureInformation <- list(list(
+                label = sig,
+                documentation = documentation
+            ))
             activeSignature <- 0
         }
     }

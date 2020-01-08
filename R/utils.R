@@ -13,7 +13,7 @@ path_from_uri <- function(uri) {
     if (is.null(uri)) {
         return(NULL)
     }
-    start_char <- ifelse(.Platform$OS.type == "windows", 9, 8)
+    start_char <- if (.Platform$OS.type == "windows") 9 else 8
     utils::URLdecode(substr(uri, start_char, nchar(uri)))
 }
 
@@ -24,7 +24,7 @@ path_to_uri <- function(path) {
     if (is.null(path)) {
         return(NULL)
     }
-    prefix <- ifelse(.Platform$OS.type == "windows", "file:///", "file://")
+    prefix <- if (.Platform$OS.type == "windows") "file:///" else "file://"
     paste0(prefix, utils::URLencode(path))
 }
 
@@ -42,14 +42,67 @@ is_rmarkdown <- function(uri) {
 #' and `TRUE` if it is in a code block. For any other files, it always returns `TRUE`.
 #'
 #' @keywords internal
-check_scope <- function(uri, document, position) {
+check_scope <- function(uri, document, point) {
     if (is_rmarkdown(uri)) {
-        line <- position$line
-        !identical(sum(vapply(
-            document$content[1:(line + 1)], startsWith, integer(1), "```")) %% 2, 0)
+        row <- point$row
+        flags <- vapply(
+            document$content[1:(row + 1)], startsWith, logical(1), "```", USE.NAMES = F)
+        if (any(flags)) {
+            last_match <- document$content[max(which(flags))]
+            stringr::str_detect(last_match, "```\\{r[ ,\\}]") &&
+                !identical(sum(flags) %% 2, 0) &&
+                !enclosed_by_quotes(document, point)
+        } else {
+            FALSE
+        }
     } else {
-        TRUE
+        !enclosed_by_quotes(document, point)
     }
+}
+
+
+fuzzy_find <- function(x, pattern) {
+    subsequence_regex <- paste0(strsplit(pattern, "")[[1]], collapse = ".*")
+    grepl(subsequence_regex, x, ignore.case = TRUE)
+}
+
+
+#' Safer version of `seq` which returns empty vector if b < a
+#' @keywords internal
+seq_safe <- function(a, b) {
+    seq(a, b, length = max(0, b - a + 1))
+}
+
+
+#' Extract the R code blocks of a Rmarkdown file
+#' @keywords internal
+extract_blocks <- function(content) {
+    begins_or_ends <- which(stringr::str_detect(content, "```"))
+    begins <- which(stringr::str_detect(content, "```\\{r[ ,\\}]"))
+    ends <- setdiff(begins_or_ends, begins)
+    blocks <- list()
+    for (begin in begins) {
+        z <- which(ends > begin)
+        if (length(z) == 0) break
+        end <- ends[min(z)]
+        lines <- seq_safe(begin + 1, end - 1)
+        if (length(lines) > 0) {
+            blocks[[length(blocks) + 1]] <- list(lines = lines, text = content[lines])
+        }
+    }
+    blocks
+}
+
+#' Strip out all the non R blocks in a R markdown file
+#' @param content a character vector
+#' @keywords internal
+purl <- function(content) {
+    blocks <- extract_blocks(content)
+    rmd_content <- rep("", length(content))
+    for (block in blocks) {
+        rmd_content[block$lines] <- content[block$lines]
+    }
+    rmd_content
 }
 
 
@@ -60,18 +113,32 @@ ncodeunit <- function(s) {
 }
 
 
-#' Determinal code units given code points
+#' Determine code points given code units
 #'
 #' @param line a character of text
-#' @param pts 0-indexed code points
+#' @param units 0-indexed code points
+#'
+#' @keywords internal
+code_point_from_unit <- function(line, units) {
+    if (!nzchar(line)) return(units)
+    offsets <- cumsum(ncodeunit(strsplit(line, "")[[1]]))
+    loc_map <- match(seq_len(utils::tail(offsets, 1)), offsets)
+    result <- c(0, loc_map)[units + 1]
+    result[is.infinite(units)] <- nchar(line)
+    result
+}
+
+#' Determine code units given code points
+#'
+#' @param line a character of text
+#' @param units 0-indexed code units
 #'
 #' @keywords internal
 code_point_to_unit <- function(line, pts) {
     if (!nzchar(line)) return(pts)
-    offsets <- cumsum(ncodeunit(strsplit(line, "")[[1]]))
-    loc_map <- match(seq_len(utils::tail(offsets, 1)), offsets)
-    result <- c(0, loc_map)[pts + 1]
-    result[is.infinite(pts)] <- nchar(line)
+    offsets <- c(0, cumsum(ncodeunit(strsplit(line, "")[[1]])))
+    result <- offsets[pts + 1]
+    result[is.infinite(pts)] <- offsets[length(offsets)]
     result
 }
 
@@ -184,4 +251,72 @@ look_backward <- function(text) {
         accessor = na_to_empty_string(matches[3]),
         token = na_to_empty_string(matches[4])
     )
+}
+
+uncomment <- function(x) gsub("^\\s*#+'?\\s*", "", x)
+
+find_doc_item <- function(doc, tag) {
+    for (item in doc) {
+        if (attr(item, "Rd_tag") == tag) {
+            return(item)
+        }
+    }
+}
+
+convert_doc_to_markdown <- function(doc) {
+    unlist(lapply(doc, function(item) {
+        tag <- attr(item, "Rd_tag")
+        if (is.null(tag)) {
+            if (length(item)) {
+                convert_doc_to_markdown(item)
+            }
+        } else if (tag == "\\R") {
+            "**R**"
+        } else if (tag == "\\dots") {
+            "..."
+        } else if (tag %in% c("\\code", "\\env", "\\eqn")) {
+            sprintf("`%s`", paste0(convert_doc_to_markdown(item), collapse = ""))
+        } else if (tag %in% c("\\ifelse", "USERMACRO")) {
+            ""
+        } else if (is.character(item)) {
+            trimws(item)
+        } else if (length(item)) {
+            convert_doc_to_markdown(item)
+        }
+    }))
+}
+
+convert_doc_string <- function(doc) {
+    paste0(convert_doc_to_markdown(doc), collapse = " ")
+}
+
+glue <- function(.x, ...) {
+    param <- list(...)
+    for (key in names(param)) {
+        .x <- gsub(paste0("{", key, "}"), param[[key]], .x, fixed = TRUE)
+    }
+    .x
+}
+
+xdoc_find_enclosing_scopes <- function(x, line, col, top = FALSE) {
+    if (top) {
+        xpath <- "/exprlist | //expr[(@line1 < {line} or (@line1 = {line} and @col1 <= {col})) and
+                (@line2 > {line} or (@line2 = {line} and @col2 >= {col}))]"
+    } else {
+        xpath <- "//expr[(@line1 < {line} or (@line1 = {line} and @col1 <= {col})) and
+                (@line2 > {line} or (@line2 = {line} and @col2 >= {col}))]"
+    }
+    xpath <- glue(xpath, line = line, col = col)
+    xml_find_all(x, xpath)
+}
+
+xdoc_find_token <- function(x, line, col) {
+    xpath <- glue("//*[not(*)][(@line1 < {line} or (@line1 = {line} and @col1 <= {col})) and (@line2 > {line} or (@line2 = {line} and @col2 >= {col}))]",
+        line = line, col = col)
+    xml_find_first(x, xpath)
+}
+
+xml_single_quote <- function(x) {
+    x <- gsub("'", "&apos;", x, fixed = TRUE)
+    x
 }

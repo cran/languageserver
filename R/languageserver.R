@@ -1,5 +1,6 @@
 #' @useDynLib languageserver
 #' @importFrom R6 R6Class
+#' @import xml2
 #' @details
 #' An implementation of the Language Server Protocol for R
 "_PACKAGE"
@@ -16,7 +17,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
         outputcon = NULL,
         exit_flag = NULL,
 
-        documents = new.env(),
+        documents = new.env(parent = .GlobalEnv),
         workspace = NULL,
 
         run_lintr = TRUE,
@@ -27,8 +28,10 @@ LanguageServer <- R6::R6Class("LanguageServer",
         initializationOptions = NULL,
         ClientCapabilities = NULL,
 
-        sync_in = NULL,
-        sync_out = NULL,
+        diagnostics_task_manager = NULL,
+        parse_task_manager = NULL,
+        resolve_task_manager = NULL,
+
         reply_queue = NULL,
 
         initialize = function(host, port) {
@@ -50,14 +53,11 @@ LanguageServer <- R6::R6Class("LanguageServer",
             self$outputcon <- outputcon
 
             self$workspace <- Workspace$new()
-            self$sync_in <- collections::OrderedDictL()
-            self$sync_out <- collections::OrderedDictL()
-            self$reply_queue <- collections::QueueL()
 
-            self$process_sync_in <- throttle(
-                function() process_sync_in(self), 0.3
-            )
-            self$process_sync_out <- (function() process_sync_out(self))
+            self$diagnostics_task_manager <- TaskManager$new()
+            self$parse_task_manager <- TaskManager$new()
+            self$resolve_task_manager <- TaskManager$new()
+
             super$initialize()
         },
 
@@ -67,31 +67,32 @@ LanguageServer <- R6::R6Class("LanguageServer",
         },
 
         process_events = function() {
-            self$process_sync_in()
-            self$process_sync_out()
-            self$process_reply_queue()
+            self$diagnostics_task_manager$run_tasks()
+            self$diagnostics_task_manager$check_tasks()
+            self$parse_task_manager$run_tasks()
+            self$parse_task_manager$check_tasks()
+            self$resolve_task_manager$run_tasks()
+            self$resolve_task_manager$check_tasks()
         },
 
-        text_sync = function(uri, document = NULL, run_lintr = TRUE, parse = TRUE, resolve = TRUE) {
-            if (self$sync_in$has(uri)) {
-                # make sure we do not accidentially override list call with `parse = FALSE`
-                item <- self$sync_in$pop(uri)
-                parse <- parse || item$parse
-                run_lintr <- run_lintr || item$run_lintr
+        text_sync = function(
+                uri, document = NULL, run_lintr = FALSE, parse = FALSE, resolve = FALSE) {
+            if (run_lintr && self$run_lintr) {
+                self$diagnostics_task_manager$add_task(
+                    uri,
+                    diagnostics_task(self, uri, document)
+                )
             }
-            self$sync_in$set(
-                uri, list(document = document, run_lintr = run_lintr, parse = parse, resolve = resolve)
-            )
-        },
-
-        process_sync_in = NULL,
-
-        process_sync_out = NULL,
-
-        process_reply_queue = function() {
-            while (self$reply_queue$size() > 0) {
-                reply <- self$reply_queue$pop()
-                self$deliver(reply)
+            if (resolve) {
+                self$resolve_task_manager$add_task(
+                    uri,
+                    parse_task(self, uri, document, resolve = TRUE)
+                )
+            } else if (parse) {
+                self$parse_task_manager$add_task(
+                    uri,
+                    parse_task(self, uri, document, resolve = FALSE)
+                )
             }
         },
 
@@ -133,8 +134,6 @@ LanguageServer <- R6::R6Class("LanguageServer",
         run = function() {
             while (TRUE) {
                 ret <- try({
-                    self$check_connection()
-
                     if (isTRUE(self$exit_flag)) {
                         logger$info("exiting")
                         break
@@ -167,12 +166,14 @@ LanguageServer$set("public", "register_handlers", function() {
         initialize = on_initialize,
         shutdown = on_shutdown,
         `textDocument/completion` = text_document_completion,
+        `completionItem/resolve` = completion_item_resolve,
         `textDocument/definition` = text_document_definition,
         `textDocument/hover` = text_document_hover,
         `textDocument/signatureHelp` = text_document_signature_help,
         `textDocument/formatting` = text_document_formatting,
         `textDocument/rangeFormatting` = text_document_range_formatting,
         `textDocument/documentSymbol` = text_document_document_symbol,
+        `textDocument/documentHighlight` = text_document_document_highlight,
         `workspace/symbol` = workspace_symbol
     )
 

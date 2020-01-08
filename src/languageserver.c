@@ -1,8 +1,8 @@
-#include "document.h"
+#include "search.h"
 #include "reader.h"
 
 
-#if !defined(_WIN32) && !defined(_WIN64)
+#if !defined(_WIN32)
 
 #include <unistd.h> /* for getppid */
 
@@ -17,10 +17,12 @@ SEXP process_is_detached() {
 #endif
 
 static const R_CallMethodDef CallEntries[] = {
-    {"content_backward_search", (DL_FUNC) &content_backward_search, 5},
+    {"find_unbalanced_bracket", (DL_FUNC) &find_unbalanced_bracket, 4},
+    {"enclosed_by_quotes", (DL_FUNC) &enclosed_by_quotes, 2},
+    {"detect_comments", (DL_FUNC) &detect_comments, 2},
     {"stdin_read_char", (DL_FUNC) &stdin_read_char, 1},
     {"stdin_read_line", (DL_FUNC) &stdin_read_line},
-#if !defined(_WIN32) && !defined(_WIN64)
+#if !defined(_WIN32)
     {"process_is_detached", (DL_FUNC) &process_is_detached},
 #endif
     {NULL, NULL, 0}
