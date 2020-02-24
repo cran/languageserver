@@ -52,8 +52,8 @@ TaskManager <- R6::R6Class("TaskManager",
     ),
     public = list(
         initialize = function() {
-            private$pending_tasks <- collections::OrderedDictL()
-            private$running_tasks <- collections::OrderedDictL()
+            private$pending_tasks <- collections::OrderedDict()
+            private$running_tasks <- collections::OrderedDict()
             self$run_tasks <- throttle(self$run_tasks_, 0.1)
             # self$run_tasks <- self$run_tasks_
         },
@@ -91,10 +91,13 @@ TaskManager <- R6::R6Class("TaskManager",
     )
 )
 
-
-create_task <- function(target, args, callback = NULL, error = NULL) {
+package_call <- function(target) {
     func <- call(":::", as.name("languageserver"), substitute(target))
     target <- eval(substitute(function(...) func(...), list(func = func)))
+    target
+}
+
+create_task <- function(target, args, callback = NULL, error = NULL) {
     Task$new(
         target = target,
         args = args,

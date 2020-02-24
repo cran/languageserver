@@ -17,7 +17,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
         outputcon = NULL,
         exit_flag = NULL,
 
-        documents = new.env(parent = .GlobalEnv),
+        documents = NULL,
         workspace = NULL,
 
         run_lintr = TRUE,
@@ -32,19 +32,19 @@ LanguageServer <- R6::R6Class("LanguageServer",
         parse_task_manager = NULL,
         resolve_task_manager = NULL,
 
-        reply_queue = NULL,
+        pending_replies = NULL,
 
         initialize = function(host, port) {
             if (is.null(port)) {
                 logger$info("connection type: stdio")
                 outputcon <- stdout()
-                inputcon <- file("stdin")
-                # note: windows doesn't non-blocking read stdin
-                open(inputcon, blocking = FALSE)
+                # note: windows doesn't support `blocking = FALSE`
+                # we use `PeekNamedPipe` in c to mimic non-blocking reading
+                inputcon <- file("stdin", open = "rb", blocking = FALSE)
             } else {
                 self$tcp <- TRUE
                 logger$info("connection type: tcp at ", port)
-                inputcon <- socketConnection(host = host, port = port, open = "r+")
+                inputcon <- socketConnection(host = host, port = port, open = "r+b")
                 logger$info("connected")
                 outputcon <- inputcon
             }
@@ -57,6 +57,8 @@ LanguageServer <- R6::R6Class("LanguageServer",
             self$diagnostics_task_manager <- TaskManager$new()
             self$parse_task_manager <- TaskManager$new()
             self$resolve_task_manager <- TaskManager$new()
+
+            self$pending_replies <- collections::Dict()
 
             super$initialize()
         },
@@ -76,22 +78,31 @@ LanguageServer <- R6::R6Class("LanguageServer",
         },
 
         text_sync = function(
-                uri, document = NULL, run_lintr = FALSE, parse = FALSE, resolve = FALSE) {
-            if (run_lintr && self$run_lintr) {
-                self$diagnostics_task_manager$add_task(
-                    uri,
-                    diagnostics_task(self, uri, document)
-                )
+                uri, document, run_lintr = FALSE, parse = FALSE) {
+
+            if (!self$pending_replies$has(uri)) {
+                self$pending_replies$set(uri, list(
+                    `textDocument/documentSymbol` = collections::Queue(),
+                    `textDocument/documentLink` = collections::Queue(),
+                    `textDocument/documentColor` = collections::Queue()
+                ))
             }
-            if (resolve) {
-                self$resolve_task_manager$add_task(
-                    uri,
-                    parse_task(self, uri, document, resolve = TRUE)
-                )
-            } else if (parse) {
+
+            if (run_lintr && self$run_lintr) {
+                temp_root <- dirname(tempdir())
+                if (fs::path_has_parent(self$rootPath, temp_root) ||
+                    !fs::path_has_parent(path_from_uri(uri), temp_root)) {
+                    self$diagnostics_task_manager$add_task(
+                        uri,
+                        diagnostics_task(self, uri, document)
+                    )
+                }
+            }
+
+            if (parse) {
                 self$parse_task_manager$add_task(
                     uri,
-                    parse_task(self, uri, document, resolve = FALSE)
+                    parse_task(self, uri, document)
                 )
             }
         },
@@ -108,13 +119,17 @@ LanguageServer <- R6::R6Class("LanguageServer",
         },
 
         write_text = function(text) {
-            cat(text, file = self$outputcon)
+            if (.Platform$OS.type == "windows") {
+                writeLines(text, self$outputcon, sep = "", useBytes = TRUE)
+            } else  {
+                cat(text, file = self$outputcon)
+            }
         },
 
         read_line = function() {
             if (self$tcp) {
                 if (socketSelect(list(self$inputcon), timeout = 0)) {
-                    readLines(self$inputcon, n = 1)
+                    readLines(self$inputcon, n = 1, encoding = "UTF-8")
                 } else {
                     character(0)
                 }
@@ -125,7 +140,9 @@ LanguageServer <- R6::R6Class("LanguageServer",
 
         read_char = function(n) {
             if (self$tcp) {
-                readChar(self$inputcon, n, useBytes = TRUE)
+                out <- readChar(self$inputcon, n, useBytes = TRUE)
+                Encoding(out) <- "UTF-8"
+                out
             } else {
                 stdin_read_char(n)
             }
@@ -133,7 +150,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
 
         run = function() {
             while (TRUE) {
-                ret <- try({
+                ret <- tryCatchStack({
                     if (isTRUE(self$exit_flag)) {
                         logger$info("exiting")
                         break
@@ -147,12 +164,9 @@ LanguageServer <- R6::R6Class("LanguageServer",
                         next
                     }
                     self$handle_raw(data)
-                },
-                silent = TRUE
-                )
-                if (inherits(ret, "try-error")) {
+                }, error = function(e) e)
+                if (inherits(ret, "error")) {
                     logger$error(ret)
-                    logger$error(as.list(traceback()))
                     logger$error("exiting")
                     break
                 }
@@ -172,8 +186,12 @@ LanguageServer$set("public", "register_handlers", function() {
         `textDocument/signatureHelp` = text_document_signature_help,
         `textDocument/formatting` = text_document_formatting,
         `textDocument/rangeFormatting` = text_document_range_formatting,
+        `textDocument/onTypeFormatting` = text_document_on_type_formatting,
         `textDocument/documentSymbol` = text_document_document_symbol,
         `textDocument/documentHighlight` = text_document_document_highlight,
+        `textDocument/documentLink` = text_document_document_link,
+        `textDocument/documentColor` = text_document_document_color,
+        `textDocument/colorPresentation` = text_document_color_presentation,
         `workspace/symbol` = workspace_symbol
     )
 

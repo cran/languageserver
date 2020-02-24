@@ -18,10 +18,6 @@ The development version of `languageserver` could be installed by running the fo
 source("https://install-github.me/REditorSupport/languageserver")
 ```
 
-## Rmarkdown
-
-The R package [`knitr`](https://github.com/yihui/knitr) is required to enable languageserver for Rmarkdown files. `languageserver` doesn't specify `knitr` as a dependency however, users may need to install it manually.
-
 ## Language Clients
 
 These editors are supported by installing the corresponding package.
@@ -41,36 +37,37 @@ These editors are supported by installing the corresponding package.
     
     or use [coc-r-lsp](https://github.com/neoclide/coc-r-lsp) with [coc.nvim](https://github.com/neoclide/coc.nvim)
 
-- EMacs: [lsp-mode](https://github.com/emacs-lsp/lsp-mode) with settings
-    ```elisp
-    (lsp-register-client
-        (make-lsp-client :new-connection
-            (lsp-stdio-connection '("R" "--slave" "-e" "languageserver::run()"))
-            :major-modes '(ess-r-mode inferior-ess-r-mode)
-            :server-id 'lsp-R))
-    ```
+- Emacs: [lsp-mode](https://github.com/emacs-lsp/lsp-mode)
+
+- JupyterLab: [jupyterlab-lsp](https://github.com/krassowski/jupyterlab-lsp)
 
 ## Services Implemented
 
 `languageserver` is still under active development, the following services have been implemented:
 
-- [x] textDocumentSync (diagnostics)
-- [x] hoverProvider
-- [x] completionProvider
-- [x] signatureHelpProvider
-- [x] definitionProvider
-- [ ] referencesProvider
-- [x] documentHighlightProvider
-- [x] documentSymbolProvider
-- [x] workspaceSymbolProvider
-- [ ] codeActionProvider
-- [ ] codeLensProvider
-- [x] documentFormattingProvider
-- [x] documentRangeFormattingProvider
-- [ ] documentOnTypeFormattingProvider
-- [ ] renameProvider
-- [ ] documentLinkProvider
-- [ ] executeCommandProvider
+- [x] [textDocumentSync](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_synchronization)
+- [x] [publishDiagnostics](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_publishDiagnostics)
+- [x] [hoverProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_hover)
+- [x] [completionProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_completion)
+- [x] [completionItemResolve](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#completionItem_resolve)
+- [x] [signatureHelpProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_signatureHelp)
+- [x] [definitionProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_definition)
+- [ ] [referencesProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_references)
+- [x] [documentHighlightProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_documentHighlight)
+- [x] [documentSymbolProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_documentSymbol)
+- [x] [workspaceSymbolProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#workspace_symbol)
+- [ ] [codeActionProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_codeAction)
+- [ ] [codeLensProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_codeLens)
+- [x] [documentFormattingProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_formatting)
+- [x] [documentRangeFormattingProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_rangeFormatting)
+- [x] [documentOnTypeFormattingProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_onTypeFormatting)
+- [ ] [renameProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_rename)
+- [x] [documentLinkProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_documentLink)
+- [x] [colorProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_documentColor)
+- [x] [colorPresentation](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_colorPresentation)
+- [ ] [foldingRangeProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_foldingRange)
+- [ ] [selectionRangeProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_selectionRange)
+- [ ] [executeCommandProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#workspace_executeCommand)
 
 ## Settings
 
@@ -97,6 +94,20 @@ These editors are supported by installing the corresponding package.
 
 With [lintr](https://github.com/jimhester/lintr) v2.0.0, the linters can be specified by creating the `.lintr` file at the project or home directory. Details can be found at lintr [documentation](https://github.com/jimhester/lintr#project-configuration). The option `languageserver.default_linters` is now deprecated in favor of the `.lintr` approach.
 
+### Customizing server capbabilities
+
+Server capabilities are defined in [capabilities.R](https://github.com/REditorSupport/languageserver/blob/master/R/capabilities.R). Users could override the settings by specifiying `languageserver.server_capabilities` option in `.Rprofile`. For example,
+the following code will turn off `definitionProvider`,
+
+```r
+options(
+    languageserver.server_capabilities = list(
+        definitionProvider = FALSE
+    )
+)
+```
+
+Please only use this option to disable providers and do not enable any providers that have not been implemented. Changing any other entries may cause unexpected behaviors on the server.
 
 ### Customizing formatting style
 
@@ -125,3 +136,21 @@ options(languageserver.formatting_style = function(options) {
 ```
 
 To further customize the formatting style, please refer to [Customizing styler](https://styler.r-lib.org/articles/customizing_styler.html).
+
+### Using persistent cache for formatting by styler
+
+With [`styler`](https://github.com/r-lib/styler) v1.3, the formatting of top-level expressions
+can be cached by [`R.cache`](https://github.com/HenrikBengtsson/R.cache), which significantly improves the formatting performance by skipping the expressions that are known in cache to be already formatted. By default, the cache only works within the current session.
+To make it work across sessions, user must run the following command to perform a one-time authorization to create a permanent directory in user home in an *interactive* R session:
+
+```r
+R.cache::getCachePath()
+```
+
+The first time the command is run, it will ask user whether to create a permanent cache directory. Type `Y` and enter, the cache directory will be created, and then all cache operations will be done across sessions so that formatted expressions could be remembered globally.
+
+To check if a permanent directory is used or not, run the following command:
+
+```r
+styler::cache_info()
+```

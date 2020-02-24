@@ -5,13 +5,25 @@
 text_document_did_open <- function(self, params) {
     textDocument <- params$textDocument
     uri <- textDocument$uri
-    content <- readr::read_lines(path_from_uri(uri))
-    if (is.null(self$documents[[uri]])) {
-        self$documents[[uri]] <- Document$new(uri, content)
+    version <- textDocument$version
+    text <- textDocument$text
+    logger$info("did open:", list(uri = uri, version = version))
+    path <- path_from_uri(uri)
+    if (!is.null(text)) {
+        content <- stringr::str_split(text, "\r\n|\n")[[1]]
+    } else if (file.exists(path)) {
+        content <- readr::read_lines(path)
     } else {
-        self$documents[[uri]]$set(content)
+        content <- NULL
     }
-    self$text_sync(uri, document = NULL, run_lintr = TRUE, parse = TRUE, resolve = TRUE)
+    if (self$workspace$documents$has(uri)) {
+        doc <- self$workspace$documents$get(uri)
+        doc$set_content(version, content)
+    } else {
+        doc <- Document$new(uri, version, content)
+        self$workspace$documents$set(uri, doc)
+    }
+    self$text_sync(uri, document = doc, run_lintr = TRUE, parse = TRUE)
 }
 
 #' `textDocument/didChange` notification handler
@@ -21,18 +33,19 @@ text_document_did_open <- function(self, params) {
 text_document_did_change <- function(self, params) {
     textDocument <- params$textDocument
     contentChanges <- params$contentChanges
-    text <- contentChanges[[1]]$text
     uri <- textDocument$uri
-    logger$info("did change: ", uri)
+    version <- textDocument$version
+    text <- contentChanges[[1]]$text
+    logger$info("did change:", list(uri = uri, version = version))
     content <- stringr::str_split(text, "\r\n|\n")[[1]]
-    if (is.null(self$documents[[uri]])) {
-        doc <- Document$new(uri, content)
-        self$documents[[uri]] <- doc
+    if (self$workspace$documents$has(uri)) {
+        doc <- self$workspace$documents$get(uri)
+        doc$set_content(version, content)
     } else {
-        self$documents[[uri]]$set(content)
-        doc <- self$documents[[uri]]
+        doc <- Document$new(uri, version, content)
+        self$workspace$documents$set(uri, doc)
     }
-    self$text_sync(uri, document = doc, run_lintr = TRUE, parse = TRUE, resolve = FALSE)
+    self$text_sync(uri, document = doc, run_lintr = TRUE, parse = TRUE)
 }
 
 #' `textDocument/willSave` notification handler
@@ -49,11 +62,25 @@ text_document_will_save <- function(self, params) {
 #' @keywords internal
 text_document_did_save <- function(self, params) {
     textDocument <- params$textDocument
+    text <- params$text
     uri <- textDocument$uri
-    logger$info("did save:", uri)
-    content <- readr::read_lines(path_from_uri(uri))
-    self$documents[[uri]] <- Document$new(uri, content)
-    self$text_sync(uri, document = NULL, run_lintr = TRUE, parse = TRUE, resolve = TRUE)
+    logger$info("did save:", list(uri = uri))
+    path <- path_from_uri(uri)
+    if (!is.null(text)) {
+        content <- stringr::str_split(text, "\r\n|\n")[[1]]
+    } else if (file.exists(path)) {
+        content <- readr::read_lines(path)
+    } else {
+        content <- NULL
+    }
+    if (self$workspace$documents$has(uri)) {
+        doc <- self$workspace$documents$get(uri)
+        doc$set_content(doc$version, content)
+    } else {
+        doc <- Document$new(uri, NULL, content)
+        self$workspace$documents$set(uri, doc)
+    }
+    self$text_sync(uri, document = doc, run_lintr = TRUE, parse = TRUE)
 }
 
 #' `textDocument/didClose` notification handler
@@ -63,7 +90,21 @@ text_document_did_save <- function(self, params) {
 text_document_did_close <- function(self, params) {
     textDocument <- params$textDocument
     uri <- textDocument$uri
-    rm(list = uri, envir = self$documents)
+    path <- path_from_uri(uri)
+    is_from_workspace <- fs::path_has_parent(path, self$rootPath)
+
+    # remove diagnostics if file is not from workspace
+    if (!is_from_workspace) {
+        diagnostics_callback(self, uri, NULL, list())
+    }
+
+    # do not remove document in package
+    if (!(is_package(self$rootPath) && is_from_workspace)) {
+        self$workspace$documents$remove(uri)
+        self$workspace$update_loaded_packages()
+    }
+
+    self$pending_replies$remove(uri)
 }
 
 #' `textDocument/willSaveWaitUntil` notification handler

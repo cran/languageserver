@@ -1,5 +1,5 @@
 SaveOptions <- list(
-    includeText = FALSE
+    includeText = TRUE
 )
 
 TextDocumentSyncKind <- list(
@@ -30,8 +30,8 @@ CodeLensOptions <- list(
 )
 
 DocumentOnTypeFormattingOptions <- list(
-    firstTriggerCharacter = NULL,
-    moreTriggerCharacter = NULL
+    firstTriggerCharacter = "\n",
+    moreTriggerCharacter = list(")", "]", "}")
 )
 
 DocumentLinkOptions <- list(
@@ -57,12 +57,13 @@ ServerCapabilities <- list(
     # codeActionProvider = FALSE,
     # codeLensProvider = CodeLensOptions,
     documentFormattingProvider = TRUE,
-    documentRangeFormattingProvider = TRUE
-    # documentOnTypeFormattingProvider = DocumentOnTypeFormattingOptions,
+    documentRangeFormattingProvider = TRUE,
+    documentOnTypeFormattingProvider = DocumentOnTypeFormattingOptions,
     # renameProvider = FALSE,
-    # documentLinkProvider = DocumentLinkOptions,
-    # colorProvider = FALSE,
+    documentLinkProvider = DocumentLinkOptions,
+    colorProvider = TRUE
     # foldingRangeProvider = FALSE,
+    # selectionRangeProvider = FALSE,
     # executeCommandProvider = ExecuteCommandOptions,
     # workspace = list()
 )

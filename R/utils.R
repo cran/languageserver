@@ -2,16 +2,67 @@
 #'
 #' @keywords internal
 merge_list <- function(x, y) {
-  x[names(y)] <- y
-  x
+    x[names(y)] <- y
+    x
 }
 
+#' tryCatch with stack captured
+#'
+#' @keywords internal
+tryCatchStack <- function(expr, ...) {
+    expr <- substitute(expr)
+    env <- parent.frame()
+    capture_calls <- function(e) {
+        calls <- sys.calls()
+        ncalls <- length(calls)
+        e$calls <- calls[-c(seq_len(frame + 7), ncalls - 1, ncalls)]
+        class(e) <- c("errorWithStack", class(e))
+        signalCondition(e)
+    }
+    frame <- sys.nframe()
+    tryCatch(withCallingHandlers(eval(expr, env), error = capture_calls), ...)
+}
+
+print.errorWithStack <- function(x, ...) {
+    cat("Error: ", conditionMessage(x), "\n", sep = "")
+
+    call <- conditionCall(x)
+    if (!is.null(call)) {
+        cat("Call: ")
+        print(call)
+    }
+
+    if (length(x$calls)) {
+        cat("Stack trace:\n")
+        rev_calls <- rev(x$calls)
+        for (i in seq_along(rev_calls)) {
+            cat(i, ": ", sep = "")
+            print(rev_calls[[i]])
+        }
+    }
+    invisible(x)
+}
+
+tryCatchTimeout <- function(expr, timeout = Inf, ...) {
+    expr <- substitute(expr)
+    envir <- parent.frame()
+    setTimeLimit(timeout, transient = TRUE)
+    on.exit(setTimeLimit())
+    tryCatch(eval(expr, envir), ...)
+}
+
+capture_print <- function(x) {
+    paste0(utils::capture.output(print(x)), collapse = "\n")
+}
 
 #' Paths and uris
 #' @keywords internal
 path_from_uri <- function(uri) {
-    if (is.null(uri)) {
-        return(NULL)
+    if (length(uri) == 0) {
+        return(character())
+    }
+    if (!startsWith(uri, "file:///")) {
+        return("")
     }
     start_char <- if (.Platform$OS.type == "windows") 9 else 8
     utils::URLdecode(substr(uri, start_char, nchar(uri)))
@@ -21,10 +72,16 @@ path_from_uri <- function(uri) {
 #' @keywords internal
 #' @rdname path_from_uri
 path_to_uri <- function(path) {
-    if (is.null(path)) {
-        return(NULL)
+    if (length(path) == 0) {
+        return(character())
     }
-    prefix <- if (.Platform$OS.type == "windows") "file:///" else "file://"
+    path <- path.expand(path)
+    if (.Platform$OS.type == "windows") {
+        prefix <- "file:///"
+        path <- gsub("\\", "/", path, fixed = TRUE)
+    } else {
+        prefix <- "file://"
+    }
     paste0(prefix, utils::URLencode(path))
 }
 
@@ -46,7 +103,7 @@ check_scope <- function(uri, document, point) {
     if (is_rmarkdown(uri)) {
         row <- point$row
         flags <- vapply(
-            document$content[1:(row + 1)], startsWith, logical(1), "```", USE.NAMES = F)
+            document$content[1:(row + 1)], startsWith, logical(1), "```", USE.NAMES = FALSE)
         if (any(flags)) {
             last_match <- document$content[max(which(flags))]
             stringr::str_detect(last_match, "```\\{r[ ,\\}]") &&
@@ -174,13 +231,14 @@ find_package <- function(path = getwd()) {
     normalizePath(prev_path)
 }
 
-#' check if an URI is a package folder
+#' check if a path is a package folder
 #'
-#' @param rootUri a character representing a URI
+#' @param rootPath a character representing a path
 #'
 #' @keywords internal
-is_package <- function(rootUri) {
-    file.exists(file.path(path_from_uri(rootUri), "DESCRIPTION"))
+is_package <- function(rootPath) {
+    file <- file.path(rootPath, "DESCRIPTION")
+    file.exists(file) && !dir.exists(file)
 }
 
 #' read a character from stdin

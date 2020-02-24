@@ -1,8 +1,13 @@
 #include "search.h"
 #include "reader.h"
 
+#ifdef _WIN32
 
-#if !defined(_WIN32)
+# include <fcntl.h>
+# include <io.h>
+# include <stdio.h>
+
+#else
 
 #include <unistd.h> /* for getppid */
 
@@ -29,6 +34,9 @@ static const R_CallMethodDef CallEntries[] = {
 };
 
 void R_init_languageserver(DllInfo *dll) {
+#ifdef _WIN32
+    _setmode(_fileno(stdout), _O_BINARY);
+#endif
     R_registerRoutines(dll, NULL, CallEntries, NULL, NULL);
     R_useDynamicSymbols(dll, FALSE);
 }

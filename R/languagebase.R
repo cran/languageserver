@@ -113,7 +113,7 @@ LanguageBase <- R6::R6Class("LanguageBase",
         },
 
         handle_raw = function(data) {
-            payload <- tryCatch(
+            payload <- tryCatchStack(
                 jsonlite::fromJSON(data, simplifyVector = FALSE),
                 error = function(e) e
             )
@@ -140,12 +140,12 @@ LanguageBase <- R6::R6Class("LanguageBase",
             params <- request$params
             if (method %in% names(self$request_handlers)) {
                 logger$info("handling request: ", method)
-                tryCatch({
+                tryCatchStack({
                     dispatch <- self$request_handlers[[method]]
                     dispatch(self, id, params)
                 },
                 error = function(e) {
-                    logger$info("internal error: ", e)
+                    logger$info("internal error:", e)
                     self$deliver(ResponseErrorMessage$new(id, "InternalError", to_string(e)))
                 }
                 )
@@ -162,12 +162,12 @@ LanguageBase <- R6::R6Class("LanguageBase",
             params <- notification$params
             if (method %in% names(self$notification_handlers)) {
                 logger$info("handling notification: ", method)
-                tryCatch({
+                tryCatchStack({
                     dispatch <- self$notification_handlers[[method]]
                     dispatch(self, params)
                 },
                 error = function(e) {
-                    logger$info("internal error: ", e)
+                    logger$info("internal error:", e)
                 }
                 )
             } else {
@@ -182,11 +182,11 @@ LanguageBase <- R6::R6Class("LanguageBase",
                 error = function(e) NULL
             )
             if ("error" %in% names(response)) {
-                logger$info("got an error: ", response$error)
+                logger$info("internal error:", response$error)
             } else if (!is.null(callback)) {
                 logger$info("calling callback")
                 if (self$catch_callback_error) {
-                    tryCatch(
+                    tryCatchStack(
                         callback(self, response$result),
                         error = function(e) logger$info("callback error: ", e)
                     )

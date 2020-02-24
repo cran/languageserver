@@ -2,27 +2,29 @@ Document <- R6::R6Class(
     "Document",
     public = list(
         uri = NULL,
+        version = NULL,
         nline = 0,
         content = NULL,
+        parse_data = NULL,
         is_rmarkdown = NULL,
+        loaded_packages = NULL,
 
-        initialize = function(uri, content = NULL) {
+        initialize = function(uri, version, content = "") {
             self$uri <- uri
+            self$version <- version
             self$is_rmarkdown <- is_rmarkdown(self$uri)
-            if (!is.null(content)) {
-                self$set(content)
-            }
+            self$set_content(version, content)
+            self$loaded_packages <- character()
         },
 
-        set = function(content) {
-            # remove last empty line
-            nline <- length(content)
-            if (nline > 0L && !nzchar(content[nline])) {
-                content <- content[-nline]
-                nline <- nline - 1
-            }
-            self$nline <- nline
+        set_content = function(version, content) {
+            self$version <- version
+            self$nline <- length(content)
             self$content <- content
+        },
+
+        update_parse_data = function(parse_data) {
+            self$parse_data <- parse_data
         },
 
         line = function(row) {
@@ -241,11 +243,11 @@ parse_expr <- function(content, expr, env, level = 0L, srcref = attr(expr, "srcr
 #' signatures in the document in order to add them to the current [Workspace].
 #'
 #' @keywords internal
-parse_document <- function(path, content = NULL, resolve = FALSE) {
-    if (is.null(content)) {
-        content <- readr::read_lines(path)
+parse_document <- function(uri, content) {
+    if (length(content) == 0) {
+        content <- ""
     }
-    if (is_rmarkdown(path)) {
+    if (is_rmarkdown(uri)) {
         content <- purl(content)
     }
     expr <- tryCatch(parse(text = content, keep.source = TRUE), error = function(e) NULL)
@@ -265,31 +267,78 @@ parse_document <- function(path, content = NULL, resolve = FALSE) {
         }
         env <- parse_env()
         parse_expr(content, expr, env)
-        xml_data <- xmlparsedata::xml_parse_data(expr)
-        env$xml_data <- xml_data
-        if (resolve) {
-            env$packages <- resolve_attached_packages(env$packages)
-        }
+        env$packages <- basename(find.package(env$packages, quiet = TRUE))
+        env$xml_data <- xmlparsedata::xml_parse_data(expr)
         env
     }
 }
 
 
-parse_callback <- function(self, uri, parse_data) {
-    if (is.null(parse_data)) return(NULL)
-    logger$info("parse_callback called")
+parse_callback <- function(self, uri, version, parse_data) {
+    if (is.null(parse_data) || !self$workspace$documents$has(uri)) return(NULL)
+    logger$info("parse_callback called:", list(uri = uri, version = version))
+    doc <- self$workspace$documents$get(uri)
+
+    parse_data$version <- version
+    old_parse_data <- doc$parse_data
     self$workspace$update_parse_data(uri, parse_data)
+
+    if (!identical(old_parse_data$packages, parse_data$packages)) {
+        if (length(parse_data$packages)) {
+            self$parse_task_manager$add_task(
+                uri,
+                resolve_task(self, uri, doc, parse_data$packages)
+            )
+            doc$loaded_packages <- parse_data$packages
+        } else {
+            doc$loaded_packages <- character()
+        }
+        self$workspace$update_loaded_packages()
+    }
+
+    pending_replies <- self$pending_replies$get(uri, NULL)
+    for (name in names(pending_replies)) {
+        queue <- pending_replies[[name]]
+        handler <- self$request_handlers[[name]]
+        while (queue$size()) {
+            item <- queue$peek()
+            if (is.null(version) || item$version == version) {
+                handler(self, item$id, item$params)
+                queue$pop()
+            } else if (item$version < version) {
+                self$deliver(Response$new(item$id))
+                queue$pop()
+            } else {
+                break
+            }
+        }
+    }
 }
 
-
-parse_task <- function(self, uri, document, resolve = FALSE) {
-    if (is.null(document)) {
-        content <- NULL
-    } else {
-        content <- document$content
-    }
+parse_task <- function(self, uri, document) {
+    version <- document$version
+    content <- document$content
     create_task(
-        parse_document,
-        list(path = path_from_uri(uri), content = content, resolve = resolve),
-        callback = function(result) parse_callback(self, uri, result))
+        package_call(parse_document),
+        list(uri = uri, content = content),
+        callback = function(result) parse_callback(self, uri, version, result),
+        error = function(e) logger$info("parse_task:", e))
+}
+
+resolve_callback <- function(self, uri, version, packages) {
+    if (!self$workspace$documents$has(uri)) return(NULL)
+    logger$info("resolve_callback called:", list(uri = uri, version = version))
+    self$workspace$load_packages(packages)
+    doc <- self$workspace$documents$get(uri)
+    doc$loaded_packages <- packages
+    self$workspace$update_loaded_packages()
+}
+
+resolve_task <- function(self, uri, document, packages) {
+    version <- document$version
+    create_task(
+        resolve_attached_packages,
+        list(pkgs = packages),
+        callback = function(result) resolve_callback(self, uri, version, result),
+        error = function(e) logger$info("resolve_task:", e))
 }
