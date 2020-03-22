@@ -5,6 +5,13 @@
 #' @name diagnostics
 NULL
 
+DiagnosticSeverity <- list(
+    Error = 1,
+    Warning = 2,
+    Information = 3,
+    Hint = 4
+)
+
 #' @rdname diagnostics
 #' @keywords internal
 diagnostic_range <- function(result, content) {
@@ -29,16 +36,11 @@ diagnostic_range <- function(result, content) {
 #' @rdname diagnostics
 #' @keywords internal
 diagnostic_severity <- function(result) {
-    if (result$type == "error") {
-        severity <- 1
-    } else if (result$type == "warning") {
-        severity <- 2
-    } else if (result$type == "style") {
-        severity <- 3
-    } else {
-        severity <- 3
-    }
-    severity
+    switch(result$type,
+        error = DiagnosticSeverity$Error,
+        warning = DiagnosticSeverity$Warning,
+        style = DiagnosticSeverity$Information,
+        DiagnosticSeverity$Information)
 }
 
 #' @rdname diagnostics
@@ -47,7 +49,7 @@ diagnostic_from_lint <- function(result, content) {
     list(
         range = diagnostic_range(result, content),
         severity = diagnostic_severity(result),
-        source = "lintr",
+        source = result$linter,
         message = result$message
     )
 }
@@ -65,31 +67,34 @@ find_config <- function(filename) {
 #' Lint and diagnose problems in a file.
 #' @keywords internal
 diagnose_file <- function(uri, content) {
+    if (length(content) == 0) {
+        return(list())
+    }
+
+    if (is_rmarkdown(uri)) {
+        # make sure Rmarkdown file has at least one block
+        if (!any(stringi::stri_detect_regex(content, "```\\{r[ ,\\}]"))) {
+            return(list())
+        }
+    }
+
     path <- path_from_uri(uri)
-    if (is.null(find_config(path))) {
+    linter_file <- find_config(path)
+    if (is.null(linter_file)) {
         linters <- getOption("languageserver.default_linters", NULL)
     } else {
         linters <- NULL
+        op <- options(lintr.linter_file = linter_file)
+        on.exit(options(op))
     }
 
-    if (length(content) <= 1 && file.exists(path)) {
-        # lintr::lint doesn't work with one line text
-        content <- readr::read_lines(path)
-        diagnostics <- lapply(
-            lintr::lint(path, linters = linters), diagnostic_from_lint, content = content)
-    } else {
-        if (is_rmarkdown(path)) {
-            # make sure Rmarkdown file has at least one block
-            if (!any(stringr::str_detect(content, "```\\{r[ ,\\}]"))) {
-                return(list())
-            }
-        }
-        # use inline data
-        text <- paste0(content, collapse = "\n")
-        diagnostics <- lapply(
-            lintr::lint(text, linters = linters), diagnostic_from_lint, content = content)
-
+    if (length(content) == 1) {
+        content <- c(content, "")
     }
+
+    text <- paste0(content, collapse = "\n")
+    diagnostics <- lapply(
+        lintr::lint(text, linters = linters), diagnostic_from_lint, content = content)
     names(diagnostics) <- NULL
     diagnostics
 }
@@ -117,5 +122,16 @@ diagnostics_task <- function(self, uri, document) {
         package_call(diagnose_file),
         list(uri = uri, content = content),
         callback = function(result) diagnostics_callback(self, uri, version, result),
-        error = function(e) logger$info("diagnostics_task:", e))
+        error = function(e) {
+            logger$info("diagnostics_task:", e)
+            diagnostics_callback(self, uri, version, list(list(
+                range = range(
+                    start = position(0, 0),
+                    end = position(0, 0)
+                ),
+                severity = DiagnosticSeverity$Error,
+                source = "lintr",
+                message = "Failed to run diagnostics"
+            )))
+        })
 }

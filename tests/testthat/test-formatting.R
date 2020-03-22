@@ -6,7 +6,7 @@ test_that("Formatting document works", {
 
     withr::local_tempfile(c("temp_file"), fileext = ".R")
     writeLines(c(
-        "my_fn<-function(x){",
+        "my_fn<-function(x){",  # nolint
         "f(x+1,x-1)+x",
         "}"
     ), temp_file)
@@ -78,7 +78,7 @@ test_that("On type formatting works", {
 
     withr::local_tempfile(c("temp_file"), fileext = ".R")
     writeLines(c(
-        "my_fn<-function(x){",
+        "my_fn<-function(x){",  # nolint
         "f(x+1,x-1)",
         "data[x,y]",
         "}"

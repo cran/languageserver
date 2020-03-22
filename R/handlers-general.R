@@ -24,14 +24,14 @@ on_initialize <- function(self, id, params) {
 on_initialized <- function(self, params) {
     logger$info("on_initialized")
     project_root <- self$rootPath
-    if (is_package(project_root)) {
+    if (length(project_root) && is_package(project_root)) {
         source_dir <- file.path(project_root, "R")
         files <- list.files(source_dir)
         for (f in files) {
             logger$info("load ", f)
             path <- file.path(source_dir, f)
             uri <- path_to_uri(path)
-            doc <- Document$new(uri, NULL, readr::read_lines(path))
+            doc <- Document$new(uri, NULL, stringi::stri_read_lines(path))
             self$workspace$documents$set(uri, doc)
             self$text_sync(uri, document = doc, parse = TRUE)
         }
