@@ -52,13 +52,11 @@ LanguageServer <- R6::R6Class("LanguageServer",
             self$inputcon <- inputcon
             self$outputcon <- outputcon
 
-            self$workspace <- Workspace$new()
-
             self$diagnostics_task_manager <- TaskManager$new()
             self$parse_task_manager <- TaskManager$new()
             self$resolve_task_manager <- TaskManager$new()
 
-            self$pending_replies <- collections::Dict()
+            self$pending_replies <- collections::dict()
 
             super$initialize()
         },
@@ -75,16 +73,20 @@ LanguageServer <- R6::R6Class("LanguageServer",
             self$parse_task_manager$check_tasks()
             self$resolve_task_manager$run_tasks()
             self$resolve_task_manager$check_tasks()
+            if (length(self$rootPath) && !is.null(self$workspace)) {
+                self$workspace$poll_namespace_file()
+            }
         },
 
         text_sync = function(
-                uri, document, run_lintr = FALSE, parse = FALSE) {
+            # TODO: move it to Workspace!?
+                uri, document, run_lintr = FALSE, parse = FALSE, delay = 0) {
 
             if (!self$pending_replies$has(uri)) {
                 self$pending_replies$set(uri, list(
-                    `textDocument/documentSymbol` = collections::Queue(),
-                    `textDocument/documentLink` = collections::Queue(),
-                    `textDocument/documentColor` = collections::Queue()
+                    `textDocument/documentSymbol` = collections::queue(),
+                    `textDocument/documentLink` = collections::queue(),
+                    `textDocument/documentColor` = collections::queue()
                 ))
             }
 
@@ -94,7 +96,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
                     !fs::path_has_parent(path_from_uri(uri), temp_root)) {
                     self$diagnostics_task_manager$add_task(
                         uri,
-                        diagnostics_task(self, uri, document)
+                        diagnostics_task(self, uri, document, delay = delay)
                     )
                 }
             }
@@ -102,7 +104,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
             if (parse) {
                 self$parse_task_manager$add_task(
                     uri,
-                    parse_task(self, uri, document)
+                    parse_task(self, uri, document, delay = delay)
                 )
             }
         },

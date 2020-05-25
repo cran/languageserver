@@ -13,7 +13,11 @@ test_that("Simple completion works", {
             "foo$sol",
             ".Mac",
             "grDev",
-            "TRU"
+            "TRU",
+            "utils:::.getHelp",
+            "utils::.getHelp",
+            "utils::osVer",
+            "datasets::mtcar"
         ),
         temp_file)
 
@@ -42,6 +46,18 @@ test_that("Simple completion works", {
 
     result <- client %>% respond_completion(temp_file, c(6, 3))
     expect_length(result$items %>% keep(~ .$label == "TRUE"), 1)
+
+    result <- client %>% respond_completion(temp_file, c(7, 16))
+    expect_length(result$items %>% keep(~ .$label == ".getHelpFile"), 1)
+
+    result <- client %>% respond_completion(temp_file, c(8, 15))
+    expect_length(result$items, 0)
+
+    result <- client %>% respond_completion(temp_file, c(9, 12))
+    expect_length(result$items %>% keep(~ .$label == "osVersion"), 1)
+
+    result <- client %>% respond_completion(temp_file, c(10, 15))
+    expect_length(result$items %>% keep(~ .$label == "mtcars"), 1)
 })
 
 test_that("Completion of function arguments works", {
@@ -81,6 +97,29 @@ test_that("Completion of user function works", {
         retry_when = function(result) length(result) == 0 || length(result$items) == 0)
 
     expect_length(result$items %>% keep(~.$label == "my_fun"), 1)
+
+})
+
+test_that("Completion of user function contains no duplicate symbols", {
+    skip_on_cran()
+    client <- language_client()
+
+    withr::local_tempfile(c("temp_file"), fileext = ".R")
+    writeLines(
+        c(
+            "my_fun <- function(x) {}",
+            "my_fun <- function(x) {}",
+            "my_f"
+        ),
+        temp_file)
+
+    client %>% did_save(temp_file)
+
+    result <- client %>% respond_completion(
+        temp_file, c(2, 4),
+        retry_when = function(result) length(result) == 0 || length(result$items) == 0)
+
+    expect_length(result$items %>% keep(~ .$label == "my_fun"), 1)
 
 })
 
@@ -132,6 +171,35 @@ test_that("Completion inside a package works", {
 
     expect_length(result$items %>% keep(~.$label == "nothing"), 1)
 })
+
+test_that("Completion of imported objects works inside a package", {
+    skip_on_cran()
+    wd <- path_real(path_package("languageserver", "projects", "mypackage"))
+    client <- language_client(working_dir = wd)
+
+    withr::local_tempfile(c("temp_file"), fileext = ".R")
+    writeLines(c("dic"), temp_file)
+
+    # client %>% did_save(path(wd, "R", "mypackage.R"))
+    client %>% did_save(temp_file)
+    result <- client %>% respond_completion(
+        temp_file, c(0, 3),
+        retry_when = function(result) length(result) == 0 || length(result$items) == 0)
+
+    expect_length(result$items %>% keep(~.$label == "dict"), 1)
+
+    withr::local_tempfile(c("temp_file"), fileext = ".R")
+    writeLines(c("lint_p"), temp_file)
+
+    # client %>% did_save(path(wd, "R", "mypackage.R"))
+    client %>% did_save(temp_file)
+    result <- client %>% respond_completion(
+        temp_file, c(0, 6),
+        retry_when = function(result) length(result) == 0 || length(result$items) == 0)
+
+    expect_length(result$items %>% keep(~.$label == "lint_package"), 1)
+})
+
 
 test_that("Completion item resolve works", {
     skip_on_cran()

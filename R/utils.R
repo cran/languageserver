@@ -106,7 +106,7 @@ check_scope <- function(uri, document, point) {
             document$content[1:(row + 1)], startsWith, logical(1), "```", USE.NAMES = FALSE)
         if (any(flags)) {
             last_match <- document$content[max(which(flags))]
-            stringi::stri_detect_regex(last_match, "```\\{r[ ,\\}]") &&
+            stringi::stri_detect_regex(last_match, "`{3,}\\s*\\{r[ ,\\}]") &&
                 !identical(sum(flags) %% 2, 0) &&
                 !enclosed_by_quotes(document, point)
         } else {
@@ -135,7 +135,7 @@ seq_safe <- function(a, b) {
 #' @keywords internal
 extract_blocks <- function(content) {
     begins_or_ends <- which(stringi::stri_detect_fixed(content, "```"))
-    begins <- which(stringi::stri_detect_regex(content, "```\\{r[ ,\\}]"))
+    begins <- which(stringi::stri_detect_regex(content, "`{3,}\\s*\\{r[ ,\\}]"))
     ends <- setdiff(begins_or_ends, begins)
     blocks <- list()
     for (begin in begins) {
@@ -181,7 +181,9 @@ code_point_from_unit <- function(line, units) {
     offsets <- cumsum(ncodeunit(strsplit(line, "")[[1]]))
     loc_map <- match(seq_len(utils::tail(offsets, 1)), offsets)
     result <- c(0, loc_map)[units + 1]
-    result[is.infinite(units)] <- nchar(line)
+    n <- nchar(line)
+    result[units > length(loc_map)] <- n
+    result[is.infinite(units)] <- n
     result
 }
 
@@ -195,7 +197,10 @@ code_point_to_unit <- function(line, pts) {
     if (!nzchar(line)) return(pts)
     offsets <- c(0, cumsum(ncodeunit(strsplit(line, "")[[1]])))
     result <- offsets[pts + 1]
-    result[is.infinite(pts)] <- offsets[length(offsets)]
+    n <- length(offsets)
+    m <- offsets[n]
+    result[pts >= n] <- m
+    result[is.infinite(pts)] <- m
     result
 }
 

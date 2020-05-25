@@ -103,6 +103,7 @@ diagnose_file <- function(uri, content) {
 diagnostics_callback <- function(self, uri, version, diagnostics) {
     if (is.null(diagnostics)) return(NULL)
     logger$info("diagnostics_callback called:", list(uri = uri, version = version))
+    # logger$info("diagnostics:", diagnostics)
     self$deliver(
         Notification$new(
             method = "textDocument/publishDiagnostics",
@@ -115,12 +116,12 @@ diagnostics_callback <- function(self, uri, version, diagnostics) {
 }
 
 
-diagnostics_task <- function(self, uri, document) {
+diagnostics_task <- function(self, uri, document, delay = 0) {
     version <- document$version
     content <- document$content
     create_task(
-        package_call(diagnose_file),
-        list(uri = uri, content = content),
+        target = package_call(diagnose_file),
+        args = list(uri = uri, content = content),
         callback = function(result) diagnostics_callback(self, uri, version, result),
         error = function(e) {
             logger$info("diagnostics_task:", e)
@@ -131,7 +132,9 @@ diagnostics_task <- function(self, uri, document) {
                 ),
                 severity = DiagnosticSeverity$Error,
                 source = "lintr",
-                message = "Failed to run diagnostics"
+                message = paste0("Failed to run diagnostics: ", conditionMessage(e))
             )))
-        })
+        },
+        delay = delay
+    )
 }
