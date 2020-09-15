@@ -52,9 +52,21 @@ LanguageServer <- R6::R6Class("LanguageServer",
             self$inputcon <- inputcon
             self$outputcon <- outputcon
 
-            self$diagnostics_task_manager <- TaskManager$new()
-            self$parse_task_manager <- TaskManager$new()
-            self$resolve_task_manager <- TaskManager$new()
+            cpus <- parallel::detectCores()
+            pool_size <- as.integer(
+                Sys.getenv("R_LANGSVR_POOL_SIZE", min(max(floor(cpus / 2), 1), 3)))
+
+            # parse pool
+            parse_pool <- if (pool_size > 0) SessionPool$new(pool_size, "parse") else NULL
+            # diagnostics is slower, so use a separate pool
+            diagnostics_pool <- if (pool_size > 0) SessionPool$new(pool_size, "diagnostics") else NULL
+
+            self$parse_task_manager <- TaskManager$new("parse", parse_pool)
+            self$diagnostics_task_manager <- TaskManager$new("diagnostics", diagnostics_pool)
+
+            # no pool for resolve task
+            # resolve task require a new session for every task
+            self$resolve_task_manager <- TaskManager$new("resolve", NULL)
 
             self$pending_replies <- collections::dict()
 
@@ -85,6 +97,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
             if (!self$pending_replies$has(uri)) {
                 self$pending_replies$set(uri, list(
                     `textDocument/documentSymbol` = collections::queue(),
+                    `textDocument/foldingRange` = collections::queue(),
                     `textDocument/documentLink` = collections::queue(),
                     `textDocument/documentColor` = collections::queue()
                 ))
@@ -92,8 +105,8 @@ LanguageServer <- R6::R6Class("LanguageServer",
 
             if (run_lintr && self$run_lintr) {
                 temp_root <- dirname(tempdir())
-                if (fs::path_has_parent(self$rootPath, temp_root) ||
-                    !fs::path_has_parent(path_from_uri(uri), temp_root)) {
+                if (path_has_parent(self$rootPath, temp_root) ||
+                    !path_has_parent(path_from_uri(uri), temp_root)) {
                     self$diagnostics_task_manager$add_task(
                         uri,
                         diagnostics_task(self, uri, document, delay = delay)
@@ -194,6 +207,7 @@ LanguageServer$set("public", "register_handlers", function() {
         `textDocument/documentLink` = text_document_document_link,
         `textDocument/documentColor` = text_document_document_color,
         `textDocument/colorPresentation` = text_document_color_presentation,
+        `textDocument/foldingRange` = text_document_folding_range,
         `workspace/symbol` = workspace_symbol
     )
 
@@ -210,10 +224,10 @@ LanguageServer$set("public", "register_handlers", function() {
 
 
 #' Run the R language server
-#' @param debug set \code{TRUE} to show debug information in stderr;
+#' @param debug set `TRUE` to show debug information in stderr;
 #'              or it could be a character string specifying the log file
-#' @param host the hostname used to create the tcp server, not used when \code{port} is \code{NULL}
-#' @param port the port used to create the tcp server. If \code{NULL}, use stdio instead.
+#' @param host the hostname used to create the tcp server, not used when `port` is `NULL`
+#' @param port the port used to create the tcp server. If `NULL`, use stdio instead.
 #' @examples
 #' \dontrun{
 #' # to use stdio

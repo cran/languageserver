@@ -38,13 +38,17 @@ language_client <- function(working_dir = getwd(), diagnostics = FALSE, capabili
     client %>% notify(
         "workspace/didChangeConfiguration", list(settings = list(diagnostics = diagnostics)))
     withr::defer_parent({
-        if (Sys.getenv("R_COVR", "") == "true") {
-            # it is necessary to shutdown the server in covr
-            # we skip this for other times for speed
+        # it is sometimes necessary to shutdown the server probably
+        # we skip this for other times for speed
+        if (Sys.getenv("R_LANGSVR_TEST_FAST", "YES") == "NO") {
             client %>% respond("shutdown", NULL, retry = FALSE)
-            client$process$wait()
+            client$process$wait(10 * 1000)  # 10 sec
+            if (client$process$is_alive()) {
+                cat("server did not shutdown peacefully\n")
+                client$process$kill_tree()
+            }
         } else {
-            client$stop()
+            client$process$kill_tree()
         }
     })
     client
@@ -314,7 +318,18 @@ respond_document_color <- function(client, path, ...) {
     )
 }
 
-wait_for <- function(client, method, timeout = 5) {
+respond_document_folding_range <- function(client, path, ...) {
+    respond(
+        client,
+        "textDocument/foldingRange",
+        list(
+            textDocument = list(uri = path_to_uri(path))
+        ),
+        ...
+    )
+}
+
+wait_for <- function(client, method, timeout = 30) {
     storage <- new.env(parent = .GlobalEnv)
     start_time <- Sys.time()
     remaining <- timeout
