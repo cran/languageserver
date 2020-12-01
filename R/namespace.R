@@ -26,8 +26,7 @@ PackageNamespace <- R6::R6Class("PackageNamespace",
             private$exports <- private$objects[is_exported]
             private$exported_functs <- private$objects[is_exported & is_function]
             private$exported_nonfuncts <- private$objects[is_exported & !is_function]
-            private$lazydata <- if (length(ns$.__NAMESPACE__.$lazydata))
-                objects(ns$.__NAMESPACE__.$lazydata) else character()
+            private$lazydata <- as.character(names(.getNamespaceInfo(ns, "lazydata")))
             private$documentation <- collections::dict()
         },
 
@@ -138,7 +137,10 @@ PackageNamespace <- R6::R6Class("PackageNamespace",
 
             # if the function exists in the workspace, write the code to a file
             temp_file <- file.path(tempdir(), paste0(symbol, ".R"))
-            stringi::stri_write_lines(code, temp_file)
+            stringi::stri_write_lines(c(
+                "# Generated from function body. Editing this file has no effect.",
+                code
+            ), temp_file)
             list(
                 uri = path_to_uri(temp_file),
                 range = range(

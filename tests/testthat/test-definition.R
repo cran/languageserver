@@ -4,7 +4,9 @@ test_that("Go to Definition works for functions in files", {
     skip_on_cran()
     client <- language_client()
 
-    withr::local_tempfile(c("defn_file", "defn2_file", "query_file"), fileext = ".R")
+    defn_file <- withr::local_tempfile(fileext = ".R")
+    defn2_file <- withr::local_tempfile(fileext = ".R")
+    query_file <- withr::local_tempfile(fileext = ".R")
     writeLines(c("my_fn <- function(x) {", "  x + 1", "}"), defn_file)
     writeLines(c("my_fn"), query_file)
 
@@ -53,7 +55,7 @@ test_that("Go to Definition works for functions in packages", {
     skip_on_cran()
     client <- language_client()
 
-    withr::local_tempfile(c("query_file"), fileext = ".R")
+    query_file <- withr::local_tempfile(fileext = ".R")
     writeLines(c("print"), query_file)
 
     client %>% did_save(query_file)
@@ -67,7 +69,7 @@ test_that("Go to Definition works in single file", {
     skip_on_cran()
     client <- language_client()
 
-    withr::local_tempfile(c("single_file"), fileext = ".R")
+    single_file <- withr::local_tempfile(fileext = ".R")
     writeLines(
         c("my_fn <- function(x) {x + 1}", "my_fn", ".nonexistent"),
         single_file)
@@ -90,7 +92,7 @@ test_that("Go to Definition works in scope with different assignment operators",
     skip_on_cran()
     client <- language_client()
 
-    withr::local_tempfile(c("single_file"), fileext = ".R")
+    single_file <- withr::local_tempfile(fileext = ".R")
     writeLines(c(
         "my_fn <- function(var1) {",
         "  var2 <- 1",
@@ -137,6 +139,69 @@ test_that("Go to Definition works in scope with different assignment operators",
     expect_equal(result$range$end, list(line = 4, character = 11))
 })
 
+
+test_that("Go to Definition works on both sides of assignment", {
+    skip_on_cran()
+    client <- language_client()
+
+    single_file <- withr::local_tempfile(fileext = ".R")
+    writeLines(c(
+        "var1 <- 1",
+        "var1 <- var1 + 1",
+        "var2 = 2",
+        "var2 = var2 + 2",
+        "3 -> var3",
+        "var3 + 3 -> var3"
+    ), single_file)
+
+    client %>% did_save(single_file)
+
+    result <- client %>% respond_definition(single_file, c(0, 1))
+
+    expect_equal(result$range$start, list(line = 0, character = 0))
+    expect_equal(result$range$end, list(line = 0, character = 9))
+
+    result <- client %>% respond_definition(single_file, c(1, 1))
+
+    expect_equal(result$range$start, list(line = 1, character = 0))
+    expect_equal(result$range$end, list(line = 1, character = 16))
+
+    result <- client %>% respond_definition(single_file, c(1, 9))
+
+    expect_equal(result$range$start, list(line = 0, character = 0))
+    expect_equal(result$range$end, list(line = 0, character = 9))
+
+    result <- client %>% respond_definition(single_file, c(2, 1))
+
+    expect_equal(result$range$start, list(line = 2, character = 0))
+    expect_equal(result$range$end, list(line = 2, character = 8))
+
+    result <- client %>% respond_definition(single_file, c(3, 1))
+
+    expect_equal(result$range$start, list(line = 3, character = 0))
+    expect_equal(result$range$end, list(line = 3, character = 15))
+
+    result <- client %>% respond_definition(single_file, c(3, 8))
+
+    expect_equal(result$range$start, list(line = 2, character = 0))
+    expect_equal(result$range$end, list(line = 2, character = 8))
+
+    result <- client %>% respond_definition(single_file, c(4, 6))
+
+    expect_equal(result$range$start, list(line = 4, character = 0))
+    expect_equal(result$range$end, list(line = 4, character = 9))
+
+    result <- client %>% respond_definition(single_file, c(5, 1))
+
+    expect_equal(result$range$start, list(line = 4, character = 0))
+    expect_equal(result$range$end, list(line = 4, character = 9))
+
+    result <- client %>% respond_definition(single_file, c(5, 15))
+
+    expect_equal(result$range$start, list(line = 5, character = 0))
+    expect_equal(result$range$end, list(line = 5, character = 16))
+})
+
 test_that("Go to Definition works when package is specified", {
     skip_on_cran()
     # When there is a user-defined function with the same name
@@ -145,7 +210,8 @@ test_that("Go to Definition works when package is specified", {
 
     client <- language_client()
 
-    withr::local_tempfile(c("defn_file", "query_file"), fileext = ".R")
+    defn_file <- withr::local_tempfile(fileext = ".R")
+    query_file <- withr::local_tempfile(fileext = ".R")
     writeLines(c("print <- function(x) {", "# Not base::print", "}"), defn_file)
     writeLines(c("print", "base::print"), query_file)
 
@@ -169,7 +235,7 @@ test_that("Go to Definition in Rmarkdown works", {
     skip_on_cran()
     client <- language_client()
 
-    withr::local_tempfile(c("single_file"), fileext = ".Rmd")
+    single_file <- withr::local_tempfile(fileext = ".Rmd")
     writeLines(
         c(
             "```{r}",

@@ -27,6 +27,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
         rootPath = NULL,
         initializationOptions = NULL,
         ClientCapabilities = NULL,
+        ServerCapabilities = NULL,
 
         diagnostics_task_manager = NULL,
         parse_task_manager = NULL,
@@ -208,6 +209,9 @@ LanguageServer$set("public", "register_handlers", function() {
         `textDocument/documentColor` = text_document_document_color,
         `textDocument/colorPresentation` = text_document_color_presentation,
         `textDocument/foldingRange` = text_document_folding_range,
+        `textDocument/references` = text_document_references,
+        `textDocument/rename` = text_document_rename,
+        `textDocument/prepareRename` = text_document_prepare_rename,
         `workspace/symbol` = workspace_symbol
     )
 
