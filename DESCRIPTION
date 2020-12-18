@@ -1,8 +1,8 @@
 Type: Package
 Package: languageserver
 Title: Language Server Protocol
-Version: 0.3.8
-Date: 2020-12-01
+Version: 0.3.9
+Date: 2020-12-17
 Authors@R: 
     c(person(given = "Randy",
              family = "Lai",
@@ -32,9 +32,9 @@ Encoding: UTF-8
 LazyData: true
 NeedsCompilation: yes
 RoxygenNote: 7.1.1
-Packaged: 2020-12-01 09:02:07 UTC; Randy
+Packaged: 2020-12-17 21:46:39 UTC; Randy
 Author: Randy Lai [aut, cre],
   Kun Ren [ctb]
 Maintainer: Randy Lai <randy.cs.lai@gmail.com>
 Repository: CRAN
-Date/Publication: 2020-12-01 09:20:03 UTC
+Date/Publication: 2020-12-18 16:10:04 UTC

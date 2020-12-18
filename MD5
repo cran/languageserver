@@ -1,7 +1,7 @@
-96b31831c6e1d28987ccbefc29ac5c59 *DESCRIPTION
+1b74c8d447d5c7fcbe0bc703fbc7771a *DESCRIPTION
 7677fe75c3fe8ad68f755a559fcc82b8 *LICENSE
 e708dc2ad636d73409fbd676471931d2 *NAMESPACE
-f5181fe0b516b29b9693d16df99d23a4 *NEWS.md
+d442fdece134d08ff9e65e5347ce7686 *NEWS.md
 68825a719d6b15f7b8978c0830c83804 *R/capabilities.R
 b6b15cf641c6c51c09ecd516d6e100eb *R/color.R
 273fc53b9b20df6e9e32f94abb2bb869 *R/completion.R
@@ -188,7 +188,7 @@ a42a122df9af4eccde0a1ab022d73580 *tests/testthat/test-references.R
 5bf65de478d42a3b7279b15a6ed3e193 *tests/testthat/test-rename.R
 b6d3a29f8df2dce187aaae437f5ed08a *tests/testthat/test-search.R
 01433290df4c591527e30a9a332bc9ca *tests/testthat/test-signature.R
-b062b5284b436e295145782970b1ad74 *tests/testthat/test-stdio.R
+d81b4f8908e697c3754e2043bfe9e617 *tests/testthat/test-stdio.R
 a8279bf8e6fe92a991ed06e00a20175a *tests/testthat/test-symbol.R
 dcc44bc7bbcc250076b319ba09b58f38 *tests/testthat/test-tcp.R
 5f08e14cfbb2309db954d98966bd552a *tests/testthat/test-unicode-path.R
