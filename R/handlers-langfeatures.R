@@ -55,7 +55,8 @@ text_document_definition  <- function(self, id, params) {
     uri <- uri_escape_unicode(textDocument$uri)
     document <- self$workspace$documents$get(uri)
     point <- document$from_lsp_position(params$position)
-    self$deliver(definition_reply(id, uri, self$workspace, document, point))
+    rootPath <- if (length(self$rootPath)) self$rootPath else dirname(path_from_uri(uri))
+    self$deliver(definition_reply(id, uri, self$workspace, document, point, rootPath))
 }
 
 #' `textDocument/typeDefinition` request handler
@@ -173,7 +174,20 @@ text_document_document_link  <- function(self, id, params) {
 #' Handler to the `documentLink/resolve` [Request].
 #' @keywords internal
 document_link_resolve  <- function(self, id, params) {
+    reply <- document_link_resolve_reply(id, self$workspace, params)
+    self$deliver(reply)
 
+    if (!is.null(reply$error)) {
+        self$deliver(
+            Notification$new(
+                method = "window/showMessage",
+                params = list(
+                    type = MessageType$Error,
+                    message = reply$error$message
+                )
+            )
+        )
+    }
 }
 
 #' `textDocument/documentColor` request handler
@@ -303,5 +317,49 @@ text_document_folding_range  <- function(self, id, params) {
 #' Handler to the `textDocument/selectionRange` [Request].
 #' @keywords internal
 text_document_selection_range <- function(self, id, params) {
+    textDocument <- params$textDocument
+    uri <- uri_escape_unicode(textDocument$uri)
+    document <- self$workspace$documents$get(uri)
+    points <- lapply(params$positions, document$from_lsp_position)
+    self$deliver(selection_range_reply(id, uri, self$workspace, document, points))
+}
+
+#' `textDocument/prepareCallHierarchy` request handler
+#'
+#' Handler to the `textDocument/prepareCallHierarchy` [Request].
+#' @keywords internal
+text_document_prepare_call_hierarchy <- function(self, id, params) {
+    textDocument <- params$textDocument
+    uri <- uri_escape_unicode(textDocument$uri)
+    document <- self$workspace$documents$get(uri)
+    point <- document$from_lsp_position(params$position)
+    self$deliver(prepare_call_hierarchy_reply(id, uri, self$workspace, document, point))
+}
+
+#' `callHierarchy/incomingCalls` request handler
+#'
+#' Handler to the `callHierarchy/incomingCalls` [Request].
+#' @keywords internal
+call_hierarchy_incoming_calls <- function(self, id, params) {
+    self$deliver(
+        call_hierarchy_incoming_calls_reply(id, self$workspace, params$item)
+    )
+}
+
+#' `callHierarchy/outgoingCalls` request handler
+#'
+#' Handler to the `callHierarchy/outgoingCalls` [Request].
+#' @keywords internal
+call_hierarchy_outgoing_calls <- function(self, id, params) {
+    self$deliver(
+        call_hierarchy_outgoing_calls_reply(id, self$workspace, params$item)
+    )
+}
+
+#' `textDocument/linkedEditingRange` request handler
+#'
+#' Handler to the `textDocument/linkedEditingRange` [Request].
+#' @keywords internal
+text_document_linked_editing_range <- function(self, id, params) {
 
 }

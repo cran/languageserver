@@ -103,7 +103,6 @@ path_from_uri <- function(uri) {
     path
 }
 
-
 #' @keywords internal
 #' @rdname path_from_uri
 path_to_uri <- function(path) {
@@ -134,6 +133,18 @@ path_has_parent <- function(x, y) {
     } else {
         fs::path_has_parent(x, y)
     }
+}
+
+equal_position <- function(x, y) {
+    x$line == y$line && x$character == y$character
+}
+
+equal_range <- function(x, y) {
+    equal_position(x$start, y$start) && equal_position(x$end, y$end)
+}
+
+equal_definition <- function(x, y) {
+    x$uri == y$uri && equal_range(x$range, y$range)
 }
 
 #' Check if a file is an RMarkdown file
@@ -168,6 +179,10 @@ check_scope <- function(uri, document, point) {
     }
 }
 
+match_with <- function(x, token) {
+    pattern <- gsub(".", "\\.", token, fixed = TRUE)
+    grepl(pattern, x, ignore.case = TRUE)
+}
 
 fuzzy_find <- function(x, pattern) {
     subsequence_regex <- gsub("(.)", "\\1.*", pattern)
@@ -489,11 +504,11 @@ throttle <- function(fun, t = 1) {
 
 #' sanitize package objects names
 #'
-#' Remove unwanted objects, _e.g._ `names<-`, `%>%`, etc.
+#' Remove unwanted objects, _e.g._ `names<-`, `%>%`, `.__C_` etc.
 #'
 #' @keywords internal
 sanitize_names <- function(objects) {
-    objects[stringi::stri_detect_regex(objects, "^(?:[^\\W_]|\\.)(?:[^\\W]|\\.)*$")]
+    objects[stringi::stri_detect_regex(objects, "^([^\\W_]|\\.(?!_))(\\w|\\.)*$")]
 }
 
 na_to_empty_string <- function(x) if (is.na(x)) "" else x
@@ -651,4 +666,40 @@ xdoc_find_token <- function(x, line, col) {
 xml_single_quote <- function(x) {
     x <- gsub("'", "&apos;", x, fixed = TRUE)
     x
+}
+
+html_to_markdown <- function(html) {
+    html_file <- file.path(tempdir(), "temp.html")
+    md_file <- file.path(tempdir(), "temp.md")
+    logger$info("Converting html to markdown using", html_file, md_file)
+    stringi::stri_write_lines(html, html_file)
+    result <- tryCatch({
+        format <- if (rmarkdown::pandoc_version() >= "2.0") "gfm" else "markdown_github"
+        rmarkdown::pandoc_convert(html_file, to = format, output = md_file)
+        paste0(stringi::stri_read_lines(md_file, encoding = "utf-8"), collapse = "\n")
+    }, error = function(e) {
+        logger$info("html_to_markdown failed: ", conditionMessage(e))
+        NULL
+    })
+    result
+}
+
+format_file_size <- function(bytes) {
+    obj_size <- structure(bytes, class = "object_size")
+    format(obj_size, units = "auto")
+}
+
+is_text_file <- function(path, n = 1000) {
+    bin <- readBin(path, "raw", n = n)
+    is_utf8 <- stringi::stri_enc_isutf8(bin)
+    if (is_utf8) {
+        return(TRUE)
+    } else {
+        result <- stringi::stri_enc_detect(bin)[[1]]
+        conf <- result$Confidence[1]
+        if (identical(conf, 1)) {
+            return(TRUE)
+        }
+    }
+    return(FALSE)
 }

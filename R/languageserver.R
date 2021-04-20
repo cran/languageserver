@@ -206,12 +206,18 @@ LanguageServer$set("public", "register_handlers", function() {
         `textDocument/documentSymbol` = text_document_document_symbol,
         `textDocument/documentHighlight` = text_document_document_highlight,
         `textDocument/documentLink` = text_document_document_link,
+        `documentLink/resolve` = document_link_resolve,
         `textDocument/documentColor` = text_document_document_color,
         `textDocument/colorPresentation` = text_document_color_presentation,
         `textDocument/foldingRange` = text_document_folding_range,
         `textDocument/references` = text_document_references,
         `textDocument/rename` = text_document_rename,
         `textDocument/prepareRename` = text_document_prepare_rename,
+        `textDocument/selectionRange` = text_document_selection_range,
+        `textDocument/prepareCallHierarchy` = text_document_prepare_call_hierarchy,
+        `callHierarchy/incomingCalls` = call_hierarchy_incoming_calls,
+        `callHierarchy/outgoingCalls` = call_hierarchy_outgoing_calls,
+        `textDocument/linkedEditingRange` = text_document_linked_editing_range,
         `workspace/symbol` = workspace_symbol
     )
 

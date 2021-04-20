@@ -35,7 +35,7 @@ DocumentOnTypeFormattingOptions <- list(
 )
 
 DocumentLinkOptions <- list(
-    resolveProvider = FALSE
+    resolveProvider = TRUE
 )
 
 RenameOptions <- list(
@@ -66,8 +66,12 @@ ServerCapabilities <- list(
     renameProvider = TRUE,
     documentLinkProvider = DocumentLinkOptions,
     colorProvider = TRUE,
-    foldingRangeProvider = TRUE
-    # selectionRangeProvider = FALSE,
+    foldingRangeProvider = TRUE,
+    selectionRangeProvider = TRUE,
+    callHierarchyProvider = TRUE
+    # linkedEditingRangeProvider = FALSE,
+    # semanticTokensProvider = FALSE,
+    # monikerProvider = FALSE,
     # executeCommandProvider = ExecuteCommandOptions,
     # workspace = list()
 )

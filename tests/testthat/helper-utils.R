@@ -8,6 +8,10 @@ suppressPackageStartupMessages({
 # a hack to make withr::defer_parent to work, see https://github.com/r-lib/withr/issues/123
 defer <- withr::defer
 
+expect_equivalent <- function(x, y) {
+    expect_equal(x, y, ignore_attr = TRUE)
+}
+
 language_client <- function(working_dir = getwd(), diagnostics = FALSE, capabilities = NULL) {
 
     if (nzchar(Sys.getenv("R_LANGSVR_LOG"))) {
@@ -289,7 +293,7 @@ respond_selection_range <- function(client, path, positions, ...) {
         "textDocument/selectionRange",
         list(
             textDocument = list(uri = path_to_uri(path)),
-            positions),
+            positions = positions),
         ...
     )
 }
@@ -354,6 +358,15 @@ respond_document_link <- function(client, path, ...) {
     )
 }
 
+respond_document_link_resolve <- function(client, params, ...) {
+    respond(
+        client,
+        "documentLink/resolve",
+        params,
+        ...
+    )
+}
+
 respond_document_color <- function(client, path, ...) {
     respond(
         client,
@@ -371,6 +384,40 @@ respond_document_folding_range <- function(client, path, ...) {
         "textDocument/foldingRange",
         list(
             textDocument = list(uri = path_to_uri(path))
+        ),
+        ...
+    )
+}
+
+respond_prepare_call_hierarchy <- function(client, path, pos, ...) {
+    respond(
+        client,
+        "textDocument/prepareCallHierarchy",
+        list(
+            textDocument = list(uri = path_to_uri(path)),
+            position = list(line = pos[1], character = pos[2])
+        ),
+        ...
+    )
+}
+
+respond_call_hierarchy_incoming_calls <- function(client, item, ...) {
+    respond(
+        client,
+        "callHierarchy/incomingCalls",
+        list(
+            item = item
+        ),
+        ...
+    )
+}
+
+respond_call_hierarchy_outgoing_calls <- function(client, item, ...) {
+    respond(
+        client,
+        "callHierarchy/outgoingCalls",
+        list(
+            item = item
         ),
         ...
     )
