@@ -8,7 +8,7 @@
 #' The language server
 #'
 #' Describe the language server and how it interacts with clients.
-#' @keywords internal
+#' @noRd
 LanguageServer <- R6::R6Class("LanguageServer",
     inherit = LanguageBase,
     public = list(
@@ -19,8 +19,6 @@ LanguageServer <- R6::R6Class("LanguageServer",
 
         documents = NULL,
         workspace = NULL,
-
-        run_lintr = TRUE,
 
         processId = NULL,
         rootUri = NULL,
@@ -104,7 +102,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
                 ))
             }
 
-            if (run_lintr && self$run_lintr) {
+            if (run_lintr && lsp_settings$get("diagnostics")) {
                 temp_root <- dirname(tempdir())
                 if (path_has_parent(self$rootPath, temp_root) ||
                     !path_has_parent(path_from_uri(uri), temp_root)) {
@@ -135,11 +133,9 @@ LanguageServer <- R6::R6Class("LanguageServer",
         },
 
         write_text = function(text) {
-            if (.Platform$OS.type == "windows") {
-                writeLines(text, self$outputcon, sep = "", useBytes = TRUE)
-            } else  {
-                cat(text, file = self$outputcon)
-            }
+            # we have made effort to ensure that text is utf-8
+            # so text is printed as is
+            writeLines(text, self$outputcon, sep = "", useBytes = TRUE)
         },
 
         read_line = function() {
@@ -208,6 +204,7 @@ LanguageServer$set("public", "register_handlers", function() {
         `textDocument/documentLink` = text_document_document_link,
         `documentLink/resolve` = document_link_resolve,
         `textDocument/documentColor` = text_document_document_color,
+        `textDocument/codeAction` = text_document_code_action,
         `textDocument/colorPresentation` = text_document_color_presentation,
         `textDocument/foldingRange` = text_document_folding_range,
         `textDocument/references` = text_document_references,
@@ -228,7 +225,9 @@ LanguageServer$set("public", "register_handlers", function() {
         `textDocument/didChange` = text_document_did_change,
         `textDocument/didSave` = text_document_did_save,
         `textDocument/didClose` = text_document_did_close,
-        `workspace/didChangeConfiguration` = workspace_did_change_configuration
+        `workspace/didChangeConfiguration` = workspace_did_change_configuration,
+        `workspace/didChangeWatchedFiles` = workspace_did_change_watched_files,
+        `$/setTrace` = protocol_set_trace
     )
 })
 
@@ -250,7 +249,14 @@ LanguageServer$set("public", "register_handlers", function() {
 run <- function(debug = FALSE, host = "localhost", port = NULL) {
     tools::Rd2txt_options(underline_titles = FALSE)
     tools::Rd2txt_options(itemBullet = "* ")
-    logger$debug_mode(debug)
+    lsp_settings$update_from_options()
+    if (isTRUE(debug)) {
+        lsp_settings$set("debug", TRUE)
+        lsp_settings$set("log_file", NULL)
+    } else if (is.character(debug)) {
+        lsp_settings$set("debug", TRUE)
+        lsp_settings$set("log_file", debug)
+    }
     langserver <- LanguageServer$new(host, port)
     langserver$run()
 }

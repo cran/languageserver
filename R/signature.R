@@ -1,6 +1,6 @@
 signature_xpath <- paste(
-    "*[LEFT_ASSIGN/preceding-sibling::expr[count(*)=1]/SYMBOL[text() = '{token_quote}' and @line1 <= {row}]]/expr[FUNCTION]",
-    "*[EQ_ASSIGN/preceding-sibling::expr[count(*)=1]/SYMBOL[text() = '{token_quote}' and @line1 <= {row}]]/expr[FUNCTION]",
+    "*[LEFT_ASSIGN/preceding-sibling::expr[count(*)=1]/SYMBOL[text() = '{token_quote}' and @line1 <= {row}]]/expr[FUNCTION | OP-LAMBDA]",
+    "*[EQ_ASSIGN/preceding-sibling::expr[count(*)=1]/SYMBOL[text() = '{token_quote}' and @line1 <= {row}]]/expr[FUNCTION | OP-LAMBDA]",
     sep = "|")
 
 #' the response to a textDocument/signatureHelp Request
@@ -8,7 +8,7 @@ signature_xpath <- paste(
 #' If the symbol at the current position is a function, return its arguments
 #' (as with [base::args()]).
 #'
-#' @keywords internal
+#' @noRd
 signature_reply <- function(id, uri, workspace, document, point) {
 
     if (!check_scope(uri, document, point)) {

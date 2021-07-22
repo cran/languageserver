@@ -1,7 +1,7 @@
 #' `textDocument/didOpen` notification handler
 #'
 #' Handler to the `textDocument/didOpen` [Notification].
-#' @keywords internal
+#' @noRd
 text_document_did_open <- function(self, params) {
     textDocument <- params$textDocument
     uri <- uri_escape_unicode(textDocument$uri)
@@ -23,13 +23,14 @@ text_document_did_open <- function(self, params) {
         doc <- Document$new(uri, version, content)
         self$workspace$documents$set(uri, doc)
     }
+    doc$did_open()
     self$text_sync(uri, document = doc, run_lintr = TRUE, parse = TRUE)
 }
 
 #' `textDocument/didChange` notification handler
 #'
 #' Handler to the `textDocument/didChange` [Notification].
-#' @keywords internal
+#' @noRd
 text_document_did_change <- function(self, params) {
     textDocument <- params$textDocument
     contentChanges <- params$contentChanges
@@ -45,13 +46,14 @@ text_document_did_change <- function(self, params) {
         doc <- Document$new(uri, version, content)
         self$workspace$documents$set(uri, doc)
     }
+    doc$did_open()
     self$text_sync(uri, document = doc, run_lintr = TRUE, parse = TRUE, delay = 0.5)
 }
 
 #' `textDocument/willSave` notification handler
 #'
 #' Handler to the `textDocument/willSave` [Notification].
-#' @keywords internal
+#' @noRd
 text_document_will_save <- function(self, params) {
 
 }
@@ -59,7 +61,7 @@ text_document_will_save <- function(self, params) {
 #' `textDocument/didSave` notification handler
 #'
 #' Handler to the `textDocument/didSave` [Notification].
-#' @keywords internal
+#' @noRd
 text_document_did_save <- function(self, params) {
     textDocument <- params[["textDocument"]]
     text <- params[["text"]]
@@ -80,13 +82,14 @@ text_document_did_save <- function(self, params) {
         doc <- Document$new(uri, NULL, content)
         self$workspace$documents$set(uri, doc)
     }
+    doc$did_open()
     self$text_sync(uri, document = doc, run_lintr = TRUE, parse = TRUE)
 }
 
 #' `textDocument/didClose` notification handler
 #'
 #' Handler to the `textDocument/didClose` [Notification].
-#' @keywords internal
+#' @noRd
 text_document_did_close <- function(self, params) {
     textDocument <- params$textDocument
     uri <- uri_escape_unicode(textDocument$uri)
@@ -96,6 +99,13 @@ text_document_did_close <- function(self, params) {
     # remove diagnostics if file is not from workspace
     if (!is_from_workspace) {
         diagnostics_callback(self, uri, NULL, list())
+    }
+
+    # mark document as closed so that
+    # workspace_did_change_watched_files will not ignore it
+    if (self$workspace$documents$has(uri)) {
+        doc <- self$workspace$documents$get(uri)
+        doc$did_close()
     }
 
     # do not remove document in package
@@ -111,7 +121,7 @@ text_document_did_close <- function(self, params) {
 #' `textDocument/willSaveWaitUntil` notification handler
 #'
 #' Handler to the `textDocument/willSaveWaitUntil` [Request].
-#' @keywords internal
+#' @noRd
 text_document_will_save_wait_until <- function(self, id, params) {
 
 }

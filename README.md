@@ -18,15 +18,15 @@ install.packages("languageserver")
 The development version of `languageserver` could be installed by running the following in R:
 
 ```r
-# install.packages("devtools")
-devtools::install_github("REditorSupport/languageserver")
+# install.packages("remotes")
+remotes::install_github("REditorSupport/languageserver")
 ```
 
 ## Language Clients
 
-These editors are supported by installing the corresponding package.
+The following editors are supported by installing the corresponding extensions:
 
-- VSCode: [vscode-r-lsp](https://github.com/REditorSupport/vscode-r-lsp)
+- VS Code: [vscode-R](https://github.com/REditorSupport/vscode-R)
 
 - Atom: [atom-ide-r](https://github.com/REditorSupport/atom-ide-r)
 
@@ -41,32 +41,32 @@ These editors are supported by installing the corresponding package.
     ```
 
   or, if you use [coc.nvim](https://github.com/neoclide/coc.nvim), you can do one of two things:
+  
+  - Install [coc-r-lsp](https://github.com/neoclide/coc-r-lsp) with:
 
-    - Install [coc-r-lsp](https://github.com/neoclide/coc-r-lsp) with:
+    ```vim
+    :CocInstall coc-r-lsp
+    ```
 
-      ```vim
-      :CocInstall coc-r-lsp
-      ```
+  - or install the languageserver package in R
 
-    - or install the languageserver package in R 
+    ```r
+    install.packages("languageserver")
+    # or install the developement version
+    # remotes::install_github("REditorSupport/languageserver")
+    ```
 
-        ```r
-        install.packages("languageserver")
-        # or install the developement version
-        # devtools::install_github("REditorSupport/languageserver")
-        ```
-      
-      Then add the following to your Coc config:
+    Then add the following to your Coc config:
 
-        ```json
-        "languageserver": {
-            "R": {
-                "command": "/usr/bin/R",
-                "args" : [ "--slave", "-e", "languageserver::run()"],
-                "filetypes" : ["r"]
-            }
+    ```json
+    "languageserver": {
+        "R": {
+            "command": "/usr/bin/R",
+            "args" : [ "--slave", "-e", "languageserver::run()"],
+            "filetypes" : ["r"]
         }
-        ```
+    }
+    ```
 
 - Emacs: [lsp-mode](https://github.com/emacs-lsp/lsp-mode)
 
@@ -87,7 +87,7 @@ These editors are supported by installing the corresponding package.
 - [x] [documentHighlightProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_documentHighlight)
 - [x] [documentSymbolProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_documentSymbol)
 - [x] [workspaceSymbolProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#workspace_symbol)
-- [ ] [codeActionProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_codeAction)
+- [x] [codeActionProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_codeAction)
 - [ ] [codeLensProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_codeLens)
 - [x] [documentFormattingProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_formatting)
 - [x] [documentRangeFormattingProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_rangeFormatting)
@@ -109,33 +109,53 @@ These editors are supported by installing the corresponding package.
 
 ## Settings
 
-`languageserver` exposes the following settings via `workspace/didChangeConfiguration`
+`languageserver` exposes the following settings via LSP configuration.
 
-```json
-{
-    "r.lsp.debug": {
-      "type": "boolean",
-      "default": false,
-      "description": "Debug R Language Server"
-    },
-    "r.lsp.diagnostics": {
-      "type": "boolean",
-      "default": true,
-      "description": "Enable Diagnostics"
-    }
-}
+settings | default | description
+----     | -----   | -----
+`r.lsp.debug`  | `false` | increase verbosity for debug purpose
+`r.lsp.log_file` | `null` | file to log debug messages, fallback to stderr if empty
+`r.lsp.diagnostics` | `true` | enable file diagnostics via [lintr](https://github.com/jimhester/lintr)
+`r.lsp.rich_documentation` | `true` | rich documentation with enhanced markdown features
+`r.lsp.snippet_support` | `true` | enable snippets in auto completion
+`r.lsp.max_completions` | 200 | maximum number of completion items
+`r.lsp.lint_cache` | `false` | toggle caching of lint results
+`r.lsp.server_capabilities` | `{}` | override server capabilities defined in [capabilities.R](https://github.com/REditorSupport/languageserver/blob/master/R/capabilities.R). See FAQ below.
+`r.lsp.link_file_size_limit` | 16384 | maximum file size (in bytes) that supports document links
+
+These settings could also specified in `.Rprofile` file via `options(languageserver.<SETTING_NAME> =  <VALUE>)`. For example,
+
+```r
+options(languageserver.snippet_support = FALSE)
 ```
+
+will turn off snippet support globally. LSP configuration settings are always overriden by `options()`.
 
 ## FAQ
 
 ### Linters
 
-With [lintr](https://github.com/jimhester/lintr) v2.0.0, the linters can be specified by creating the `.lintr` file at the project or home directory. Details can be found at lintr [documentation](https://github.com/jimhester/lintr#project-configuration). The option `languageserver.default_linters` is now deprecated in favor of the `.lintr` approach.
+With [lintr](https://github.com/jimhester/lintr) v2.0.0, the linters can be specified by creating the `.lintr` file at the project or home directory. Details can be found at lintr [documentation](https://github.com/jimhester/lintr#project-configuration).
 
 ### Customizing server capbabilities
 
-Server capabilities are defined in [capabilities.R](https://github.com/REditorSupport/languageserver/blob/master/R/capabilities.R). Users could override the settings by specifiying `languageserver.server_capabilities` option in `.Rprofile`. For example,
-the following code will turn off `definitionProvider`,
+Server capabilities are defined in
+[capabilities.R](https://github.com/REditorSupport/languageserver/blob/master/R/capabilities.R).
+Users could override the capabilities by specifying the LSP configuration setting
+`server_capabilities` or
+`options(languageserver.server_capabilities)` in `.Rprofile`. For example, to turn off `definitionProvider`, one could either use LSP configuration
+
+```json
+"r": {
+    "lsp": {
+        "server_capabilities": {
+            "definitionProvider": false
+        }
+    }
+}
+```
+
+or R options
 
 ```r
 options(
@@ -144,8 +164,6 @@ options(
     )
 )
 ```
-
-Please only use this option to disable providers and do not enable any providers that have not been implemented. Changing any other entries may cause unexpected behaviors on the server.
 
 ### Customizing formatting style
 
@@ -174,10 +192,3 @@ options(languageserver.formatting_style = function(options) {
 ```
 
 To further customize the formatting style, please refer to [Customizing styler](https://styler.r-lib.org/articles/customizing_styler.html).
-
-### Using persistent cache for formatting by styler
-
-With [`styler`](https://github.com/r-lib/styler) v1.3, the formatting of top-level expressions
-can be cached by [`R.cache`](https://github.com/HenrikBengtsson/R.cache), which significantly improves the formatting performance by skipping the expressions that are known in cache to be already formatted. By default, the cache only works within the current session.
-
-To make it work across sessions, set the R option `R.cache.rootPath` or environment variable `R_CACHE_ROOTPATH` to an existent path. For more details, see [styler caching](https://styler.r-lib.org/reference/caching.html).
