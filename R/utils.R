@@ -462,6 +462,19 @@ is_package <- function(rootPath) {
     file.exists(file) && !dir.exists(file)
 }
 
+get_root_path_for_uri <- function(uri, rootPath) {
+    if (length(rootPath)) {
+        # valid workspace folder
+        rootPath
+    } else if (nzchar(path <- path_from_uri(uri))) {
+        # null workspace folder
+        dirname(path)
+    } else {
+        # untitled document
+        getwd()
+    }
+}
+
 #' read a character from stdin
 #'
 #' @noRd
@@ -608,6 +621,38 @@ find_doc_item <- function(doc, tag) {
             return(item)
         }
     }
+}
+
+get_help_rd <- function(hfile) {
+    getNamespace("utils")$.getHelpFile(hfile)
+}
+
+get_help <- function(hfile, format = c("html", "text")) {
+    format <- match.arg(format)
+
+    rd <- get_help_rd(hfile)
+    paths <- as.character(hfile)
+
+    if (length(paths) == 0) {
+        return(NULL)
+    }
+
+    pkgname <- basename(dirname(dirname(paths[[1]])))
+
+    if (format == "html") {
+        result <- paste0(utils::capture.output(
+            tools::Rd2HTML(rd, package = pkgname, outputEncoding = "UTF-8")
+        ), collapse = "\n")
+        result <- gsub(".*<body>\n*(.*)\n*</body>.*", "\\1", result)
+    } else if (format == "text") {
+        result <- paste0(utils::capture.output(
+            tools::Rd2txt(rd, package = pkgname, outputEncoding = "UTF-8")
+        ), collapse = "\n")
+    } else {
+        stop("Invalid format")
+    }
+
+    enc2utf8(result)
 }
 
 convert_doc_to_markdown <- function(doc) {

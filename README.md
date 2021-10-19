@@ -3,19 +3,43 @@
 [![Gitter](https://badges.gitter.im/REditorSupport/community.svg)](https://gitter.im/REditorSupport/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
 [![Build Status](https://travis-ci.org/REditorSupport/languageserver.svg?branch=master)](https://travis-ci.org/REditorSupport/languageserver)
 [![Github Action](https://github.com/REditorSupport/languageserver/workflows/build/badge.svg?branch=master)](https://github.com/REditorSupport/languageserver)
-[![codecov](https://codecov.io/gh/REditorSupport/languageserver/branch/master/graph/badge.svg)](https://codecov.io/gh/REditorSupport/languageserver)
+[![codecov](https://codecov.io/gh/REditorSupport/languageserver/branch/master/graph/badge.svg)](https://app.codecov.io/gh/REditorSupport/languageserver)
 [![CRAN\_Status\_Badge](http://www.r-pkg.org/badges/version/languageserver)](https://cran.r-project.org/package=languageserver)
 [![CRAN Downloads](http://cranlogs.r-pkg.org/badges/grand-total/languageserver)](https://cran.r-project.org/package=languageserver)
 
 `languageserver` is an implementation of the Microsoft's [Language Server Protocol](https://microsoft.github.io/language-server-protocol/) for the language of R.
 
-It is released on CRAN and can be easily installed by
+- [Installation](#installation)
+- [Language Clients](#language-clients)
+- [Services Implemented](#services-implemented)
+- [Settings](#settings)
+- [FAQ](#faq)
+  - [Linters](#linters)
+  - [Customizing server capabilities](#customizing-server-capabilities)
+  - [Customizing formatting style](#customizing-formatting-style)
+
+## Installation
+
+A few dependencies are required beforehand:
+
+```bash
+# On Debian, Ubuntu, etc.
+apt install --assume-yes --no-install-recommends build-essential libcurl4-openssl-dev libssl-dev libxml2-dev r-base
+
+# On Fedora, Centos, etc.
+dnf install --assumeyes --setopt=install_weak_deps=False @development-tools libcurl-devel libxml2-devel openssl-devel R
+
+# On Alpine
+apk add --no-cache curl-dev g++ gcc libxml2-dev linux-headers make R R-dev
+```
+
+`languageserver` is released on CRAN and can be easily installed by
 
 ```r
 install.packages("languageserver")
 ```
 
-The development version of `languageserver` could be installed by running the following in R:
+The development version of `languageserver` could be installed by
 
 ```r
 # install.packages("remotes")
@@ -70,7 +94,7 @@ The following editors are supported by installing the corresponding extensions:
 
 - Emacs: [lsp-mode](https://github.com/emacs-lsp/lsp-mode)
 
-- JupyterLab: [jupyterlab-lsp](https://github.com/krassowski/jupyterlab-lsp)
+- JupyterLab: [jupyterlab-lsp](https://github.com/jupyter-lsp/jupyterlab-lsp)
 
 ## Services Implemented
 
@@ -137,7 +161,7 @@ will turn off snippet support globally. LSP configuration settings are always ov
 
 With [lintr](https://github.com/jimhester/lintr) v2.0.0, the linters can be specified by creating the `.lintr` file at the project or home directory. Details can be found at lintr [documentation](https://github.com/jimhester/lintr#project-configuration).
 
-### Customizing server capbabilities
+### Customizing server capabilities
 
 Server capabilities are defined in
 [capabilities.R](https://github.com/REditorSupport/languageserver/blob/master/R/capabilities.R).

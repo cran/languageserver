@@ -376,6 +376,33 @@ test_that("Completion of local function arguments works", {
     expect_length(arg_items, 1)
 })
 
+test_that("Completion of local function arguments works in untitled documents", {
+    skip_on_cran()
+    client <- language_client()
+
+    uri <- "untitled:Untitled-1"
+
+    client %>% did_open(uri = uri, text = c(
+        "local({",
+        "  test <- function(vararg1, vararg2=1) {",
+        "    vararg1 + vararg2",
+        "  }",
+        "  test(vararg",
+        "  )",
+        "})"
+    ))
+
+    result <- client %>% respond_completion(
+        NULL, c(4, 13), uri = uri,
+        retry_when = function(result) length(result) == 0 || length(result$items) == 0
+    )
+    arg_items <- result$items %>% keep(~ .$label == "vararg1")
+    expect_length(arg_items, 1)
+
+    arg_items <- result$items %>% keep(~ .$label == "vararg2")
+    expect_length(arg_items, 1)
+})
+
 test_that("Completion of user function arguments preserves the order of arguments", {
     skip_on_cran()
     client <- language_client()
@@ -464,6 +491,50 @@ test_that("Completion of symbols in scope works", {
             "my_fun <- function(xvar1) {",
             "    xvar2 = 1",
             "    2 -> xvar3",
+            "    for (xvar4 in 1:10) {",
+            "        xvar",
+            "    }",
+            "}"
+        ),
+        temp_file
+    )
+
+    client %>% did_save(temp_file)
+
+    result <- client %>% respond_completion(
+        temp_file, c(5, 12),
+        retry_when = function(result) length(result) == 0 || length(result$items) == 0
+    )
+
+    expect_length(result$items %>% discard(~ .$kind == CompletionItemKind$Text), 5)
+    expect_length(result$items %>%
+        keep(~ .$label == "xvar0") %>%
+        discard(~ .$kind == CompletionItemKind$Text), 1)
+    expect_length(result$items %>%
+        keep(~ .$label == "xvar1") %>%
+        discard(~ .$kind == CompletionItemKind$Text), 1)
+    expect_length(result$items %>%
+        keep(~ .$label == "xvar2") %>%
+        discard(~ .$kind == CompletionItemKind$Text), 1)
+    expect_length(result$items %>%
+        keep(~ .$label == "xvar3") %>%
+        discard(~ .$kind == CompletionItemKind$Text), 1)
+    expect_length(result$items %>%
+        keep(~ .$label == "xvar4") %>%
+        discard(~ .$kind == CompletionItemKind$Text), 1)
+})
+
+test_that("Completion of symbols in scope works with semi-colons", {
+    skip_on_cran()
+    client <- language_client()
+
+    temp_file <- withr::local_tempfile(fileext = ".R")
+    writeLines(
+        c(
+            "xvar0 <- rnorm(10);",
+            "my_fun <- function(xvar1) {",
+            "    xvar2 = 1;",
+            "    2 -> xvar3;",
             "    for (xvar4 in 1:10) {",
             "        xvar",
             "    }",
