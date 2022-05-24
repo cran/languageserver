@@ -135,6 +135,15 @@ path_has_parent <- function(x, y) {
     }
 }
 
+with_wd <- function(wd, expr) {
+    if (is.null(wd)) {
+        wd <- getwd()
+    }
+    oldwd <- setwd(wd)
+    on.exit(setwd(oldwd))
+    expr
+}
+
 equal_position <- function(x, y) {
     x$line == y$line && x$character == y$character
 }
@@ -162,10 +171,9 @@ is_rmarkdown <- function(uri) {
 #'
 #' @noRd
 check_scope <- function(uri, document, point) {
-    if (is_rmarkdown(uri)) {
+    if (document$is_rmarkdown) {
         row <- point$row
-        flags <- vapply(
-            document$content[1:(row + 1)], startsWith, logical(1), "```", USE.NAMES = FALSE)
+        flags <- startsWith(document$content[1:(row + 1)], "```")
         if (any(flags)) {
             last_match <- document$content[max(which(flags))]
             stringi::stri_detect_regex(last_match, "```+\\s*\\{[rR][ ,\\}]") &&
@@ -719,8 +727,10 @@ html_to_markdown <- function(html) {
     logger$info("Converting html to markdown using", html_file, md_file)
     stringi::stri_write_lines(html, html_file)
     result <- tryCatch({
-        format <- if (rmarkdown::pandoc_version() >= "2.0") "gfm" else "markdown_github"
-        rmarkdown::pandoc_convert(html_file, to = format, output = md_file)
+        pandoc2 <- rmarkdown::pandoc_version() >= "2.0"
+        format <- if (pandoc2) "gfm" else "markdown_github"
+        options <- if (pandoc2) c("--lua-filter", system.file(package = "languageserver", "lua/html-to-markdown.lua"))
+        rmarkdown::pandoc_convert(html_file, to = format, output = md_file, options = options)
         paste0(stringi::stri_read_lines(md_file, encoding = "utf-8"), collapse = "\n")
     }, error = function(e) {
         logger$info("html_to_markdown failed: ", conditionMessage(e))

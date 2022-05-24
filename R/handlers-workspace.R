@@ -26,6 +26,12 @@ workspace_did_change_configuration <- function(self, params) {
     logger$info("settings ", settings)
 
     lsp_settings$update_from_workspace(settings)
+
+    if (!lsp_settings$get("diagnostics")) {
+        for (uri in self$workspace$documents$keys()) {
+            diagnostics_callback(self, uri, NULL, list())
+        }
+    }
 }
 
 #' `workspace/didChangeWatchedFiles` notification handler
@@ -33,8 +39,6 @@ workspace_did_change_configuration <- function(self, params) {
 #' Handler to the `workspace/didChangeWatchedFiles` [Notification].
 #' @noRd
 workspace_did_change_watched_files <- function(self, params) {
-    logger$info("workspace_did_change_watched_files:", params)
-
     # All open documents will be automatically handled by lsp requests.
     # Only non-open documents in a package should be handled here.
 
@@ -61,7 +65,7 @@ workspace_did_change_watched_files <- function(self, params) {
 
             if (type == FileChangeType$Created || type == FileChangeType$Changed) {
                 logger$info("load", path)
-                doc <- Document$new(uri, NULL, stringi::stri_read_lines(path))
+                doc <- Document$new(uri, language = "r", version = NULL, content = stringi::stri_read_lines(path))
                 self$workspace$documents$set(uri, doc)
                 self$text_sync(uri, document = doc, parse = TRUE)
             } else if (type == FileChangeType$Deleted) {

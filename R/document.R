@@ -2,6 +2,7 @@ Document <- R6::R6Class(
     "Document",
     public = list(
         uri = NULL,
+        language = NULL,
         version = NULL,
         is_open = FALSE,
         nline = 0,
@@ -10,10 +11,11 @@ Document <- R6::R6Class(
         is_rmarkdown = NULL,
         loaded_packages = NULL,
 
-        initialize = function(uri, version, content = "") {
+        initialize = function(uri, language = NULL, version = NULL, content = "") {
             self$uri <- uri
+            self$language <- language
             self$version <- version
-            self$is_rmarkdown <- is_rmarkdown(self$uri)
+            self$is_rmarkdown <- if (is.null(language)) is_rmarkdown(uri) else language == "rmd"
             self$set_content(version, content)
             self$loaded_packages <- character()
         },
@@ -290,10 +292,8 @@ parser_hooks <- list(
         }
     },
     "pacman::p_load" = function(expr, action) {
-        fun <- if (requireNamespace("pacman")) pacman::p_load else
-            function(..., char, install = TRUE,
-                     update = getOption("pac_update"),
-                     character.only = FALSE) NULL
+        fun <- if (requireNamespace("pacman", quietly = TRUE)) pacman::p_load else
+            function(..., char, install = TRUE, update = getOption("pac_update"), character.only = FALSE) NULL
         call <- match.call(fun, expr, expand.dots = FALSE)
         if (!isTRUE(call$character.only)) {
             packages <- vapply(call[["..."]], as.character, character(1L))
@@ -399,9 +399,6 @@ parse_document <- function(uri, content) {
     if (length(content) == 0) {
         content <- ""
     }
-    if (is_rmarkdown(uri)) {
-        content <- purl(content)
-    }
     # replace tab with a space since the width of a tab is 1 in LSP but 8 in getParseData().
     content <- gsub("\t", " ", content, fixed = TRUE)
     expr <- tryCatch(parse(text = content, keep.source = TRUE), error = function(e) NULL)
@@ -468,6 +465,9 @@ parse_callback <- function(self, uri, version, parse_data) {
 parse_task <- function(self, uri, document, delay = 0) {
     version <- document$version
     content <- document$content
+    if (document$is_rmarkdown) {
+        content <- purl(content)
+    }
     create_task(
         target = package_call(parse_document),
         args = list(uri = uri, content = content),

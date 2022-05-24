@@ -220,10 +220,9 @@ Workspace <- R6::R6Class("Workspace",
                 matches <- symbols[fuzzy_find(symbols, pattern)]
                 result <- c(result, lapply(
                     unname(parse_data$definitions[matches]),
-                    function(def) c(
-                        uri = doc$uri,
-                        def
-                    )
+                    function(def) {
+                        c(uri = doc$uri, def)
+                    }
                 ))
             }
             result
@@ -256,7 +255,7 @@ Workspace <- R6::R6Class("Workspace",
                 logger$info("load ", f)
                 path <- file.path(source_dir, f)
                 uri <- path_to_uri(path)
-                doc <- Document$new(uri, NULL, stringi::stri_read_lines(path))
+                doc <- Document$new(uri, language = "r", version = NULL, content = stringi::stri_read_lines(path))
                 self$documents$set(uri, doc)
                 # TODO: move text_sync to Workspace!?
                 langserver$text_sync(uri, document = doc, parse = TRUE)

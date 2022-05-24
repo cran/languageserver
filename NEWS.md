@@ -1,6 +1,43 @@
+# languageserver 0.3.13
+
+**Closed issues:**                                                   
+                                                                                          
+- Language Server crashing sporadically (#368)                                        
+- Why not set up r-universe? (#536)                                                   
+- Signature help not show up in if-else branch (#530)                                 
+- Some of the tables of arguments are too complex to be represented by GFM (#533)     
+- Rmd detection ignores front matter (#507)                                           
+- Range formatting and onTypeFormatting are performed in Rmd non-code content (#224)
+- Respect document language specified from editor (#510)
+- "No newline at end of file" after formatting file in VS Code (#462)
+- completionItem/resolve result may not be null (#504)
+- Disabling linting has no effect (#497)
+
+**Merged pull requests:**
+
+- R 4.2 supports Unicode on Windows (#549)
+- read may return -1 on error (#548)
+- R universe (#542)
+- do not pop the unbalance brackets in the current row (#541)
+- Update GItHub Actions version (#537)
+- Bump actions/upload-artifact from 1 to 3 (#540)
+- Bump styfle/cancel-workflow-action from 0.9.0 to 0.9.1 (#539)
+- Bump actions/cache from 2 to 3 (#538)
+- convert the table of arguments to the sections of arguments with Lua filter (#534, thanks @atusy))
+- Added an entry for BBEdit (#532)
+- Support arg completion for primitive functions (#526)
+- Check rmd scope in on type formatting (#525)
+- Respect document `languageId` (#511)
+- Document formatting ensures trailing empty line (#509)
+- Only call `fs::path_abs` with existing files (#506)
+- `completionItem/resolve` always returns `completionItem` (#505)
+- Unpublish diagnostics when disabled (#498)
+- add whitespace to NEWS.md (#490)
+
 # languageserver 0.3.12
 
-**Closed issues:**                                                                         
+**Closed issues:**
+
 - Documentation not working with R 4.1.1 (#468)
 - Clean up dependencies (#470)
 - Documentation for functions assigned with `=` differs from functions assigned with `<-` (#466)
@@ -8,6 +45,7 @@
 - Null workspace folder not working with untitled documents (#460)
 
 **Merged pull requests:**
+
 - Add installation steps of OS-specific dependencies (#247)
 - Use internal `get_help` instead of repr (#469)
 - Remove desc from imports (#471)
@@ -17,10 +55,11 @@
 
 # languageserver 0.3.11
 
-**Closed issues:**                                                                     
+**Closed issues:**
+
 - documentation only loaded for packages named in a library() call, not with p_load() (#257)
 - Minimal {styler} version requirement (#457)
-- If load package via pacman::p_load(), the autocompletion will be not able to work well  (#426)
+- If load package via pacman::p_load(), the autocompletion will be not able to work well (#426)
 - If I wrap library call in suppressPackageStartUpLanguages, autocompletion won't work (#451)
 - Handle `workspace/didChangeWatchedFiles` (#446)
 - Environment variable LANG (#435)
@@ -31,6 +70,7 @@
 - Provide diagnostics on non-installed packages (#80)
 
 **Merged pull requests:**
+
 - Require styler >= 1.5.1 (#458)
 - Support unscoped functions and library functions (#452)
 - Handle `workspace/didChangeWatchedFiles` (#447)
@@ -46,12 +86,13 @@
 
 # languageserver 0.3.10
 
-**Closed issues:**                                                   
-- definitionProvider should work with file path (#415)               
-- Null value in documentation does not trigger signature (#417)      
-- Improve completion performance (#412)                              
-- Completion not working before close parenthesis (#410)             
-- Use `styler::style_text(base_indention=)` for `styler > 1.4.0` (#400)                                                                   
+**Closed issues:**
+
+- definitionProvider should work with file path (#415)
+- Null value in documentation does not trigger signature (#417)
+- Improve completion performance (#412)
+- Completion not working before close parenthesis (#410)
+- Use `styler::style_text(base_indention=)` for `styler > 1.4.0` (#400)
 - Segfault on incorrect coordinates (#395)
 - Case-insensitive and fuzzy match in completion (#401)
 - Non-interactive setup of persistent {R.cache} cache for {styler} (#402)
@@ -61,6 +102,7 @@
 - [FR] Display promise / active-binding objects in the OUTLINE (#362)
 
 **Merged pull requests:**
+
 - Definition provider works with file path (#416)
 - Fix null doc_string in signature (#418)
 - Faster completion (#413)

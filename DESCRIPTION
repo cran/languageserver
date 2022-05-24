@@ -1,8 +1,8 @@
 Type: Package
 Package: languageserver
 Title: Language Server Protocol
-Version: 0.3.12
-Date: 2021-10-18
+Version: 0.3.13
+Date: 2022-05-22
 Authors@R: 
     c(person(given = "Randy",
              family = "Lai",
@@ -29,11 +29,11 @@ Suggests: covr (>= 3.4.0), magrittr (>= 1.5), mockery (>= 0.4.2),
 ByteCompile: yes
 Encoding: UTF-8
 NeedsCompilation: yes
-RoxygenNote: 7.1.1
+RoxygenNote: 7.1.2
 Config/testthat/edition: 3
-Packaged: 2021-10-19 17:09:05 UTC; randylai
+Packaged: 2022-05-23 23:46:02 UTC; randylai
 Author: Randy Lai [aut, cre],
   Kun Ren [ctb]
 Maintainer: Randy Lai <randy.cs.lai@gmail.com>
 Repository: CRAN
-Date/Publication: 2021-10-19 17:30:09 UTC
+Date/Publication: 2022-05-24 10:00:08 UTC
