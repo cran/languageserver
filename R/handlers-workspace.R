@@ -20,8 +20,8 @@ workspace_did_change_configuration <- function(self, params) {
     settings <- params$settings
 
     # flatten vscode r-lsp settings
-    vscode_setting <- tryCatch(settings$r$lsp, error = function(e) NULL)
-    settings <- if (is.null(vscode_setting)) settings else vscode_setting
+    vscode_settings <- settings$r$lsp
+    settings <- if (is.null(vscode_settings)) settings else vscode_settings
 
     logger$info("settings ", settings)
 
@@ -43,7 +43,7 @@ workspace_did_change_watched_files <- function(self, params) {
     # Only non-open documents in a package should be handled here.
 
     project_root <- self$rootPath
-    if (length(project_root) && is_package(project_root)) {
+    if (is_package(project_root)) {
         source_dir <- file.path(project_root, "R")
         for (file_event in params$changes) {
             uri <- file_event$uri

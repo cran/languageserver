@@ -1,6 +1,7 @@
 #' @useDynLib languageserver
 #' @importFrom R6 R6Class
 #' @import xml2
+#' @importFrom parallel detectCores
 #' @details
 #' An implementation of the Language Server Protocol for R
 "_PACKAGE"
@@ -11,6 +12,12 @@
 #' @noRd
 LanguageServer <- R6::R6Class("LanguageServer",
     inherit = LanguageBase,
+    private = list(
+        finalize = function() {
+            close(self$inputcon)
+            super$finalize()
+        }
+    ),
     public = list(
         tcp = FALSE,
         inputcon = NULL,
@@ -70,11 +77,6 @@ LanguageServer <- R6::R6Class("LanguageServer",
             self$pending_replies <- collections::dict()
 
             super$initialize()
-        },
-
-        finalize = function() {
-            close(self$inputcon)
-            super$finalize()
         },
 
         process_events = function() {

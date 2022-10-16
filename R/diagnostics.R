@@ -5,17 +5,6 @@
 #' @name diagnostics
 NULL
 
-
-#' Check if lintr is 2.0.1.9000 above. A number of features relies on it.
-#' @noRd
-lintr_is_new_enough <- function() {
-    return(
-        utils::packageVersion("lintr") >= "2.0.1.9000" &&
-            "text" %in% names(formals(lintr::lint))
-    )
-}
-
-
 DiagnosticSeverity <- list(
     Error = 1,
     Warning = 2,
@@ -77,7 +66,7 @@ find_config <- function(filename) {
 #'
 #' Lint and diagnose problems in a file.
 #' @noRd
-diagnose_file <- function(uri, is_rmarkdown, content, cache = FALSE) {
+diagnose_file <- function(uri, content, is_rmarkdown = FALSE, globals = NULL, cache = FALSE) {
     if (length(content) == 0) {
         return(list())
     }
@@ -95,26 +84,21 @@ diagnose_file <- function(uri, is_rmarkdown, content, cache = FALSE) {
         content <- c(content, "")
     }
 
-    if (lintr_is_new_enough()) {
-        lints <- lintr::lint(path, cache = cache, text = content)
-    } else {
-        # TODO: remove it once new version of lintr is released
-        linter_file <- find_config(path)
-        if (!is.null(linter_file)) {
-            op <- options(lintr.linter_file = linter_file)
-            on.exit(options(op))
-        }
-        text <- paste0(content, collapse = "\n")
-        lints <- lintr::lint(text, cache = cache)
+    if (length(globals)) {
+        env_name <- "languageserver:globals"
+        do.call("attach", list(globals, name = env_name, warn.conflicts = FALSE))
+        on.exit(do.call("detach", list(env_name, character.only = TRUE)))
     }
 
+    lints <- lintr::lint(path, cache = cache, text = content)
     diagnostics <- lapply(lints, diagnostic_from_lint, content = content)
     names(diagnostics) <- NULL
     diagnostics
 }
 
 diagnostics_callback <- function(self, uri, version, diagnostics) {
-    if (is.null(diagnostics) || !self$workspace$documents$has(uri)) return(NULL)
+    if (is.null(diagnostics) || !self$workspace$documents$has(uri) || !lsp_settings$get("diagnostics")) return(NULL)
+
     logger$info("diagnostics_callback called:", list(
         uri = uri,
         version = version,
@@ -136,12 +120,30 @@ diagnostics_callback <- function(self, uri, version, diagnostics) {
 diagnostics_task <- function(self, uri, document, delay = 0) {
     version <- document$version
     content <- document$content
+
+    is_package <- is_package(self$rootPath)
+    globals <- NULL
+
+    if (is_package) {
+        globals <- new.env(parent = emptyenv())
+        for (doc in self$workspace$documents$values()) {
+            if (dirname(path_from_uri(doc$uri)) != file.path(self$rootPath, "R")) next
+            parse_data <- doc$parse_data
+            if (is.null(parse_data)) next
+            for (symbol in parse_data$nonfuncts) {
+                globals[[symbol]] <- NULL
+            }
+            list2env(parse_data$functions, globals)
+        }
+    }
+
     create_task(
         target = package_call(diagnose_file),
         args = list(
             uri = uri,
-            is_rmarkdown = document$is_rmarkdown,
             content = content,
+            is_rmarkdown = document$is_rmarkdown,
+            globals = globals,
             cache = lsp_settings$get("lint_cache")
         ),
         callback = function(result) diagnostics_callback(self, uri, version, result),

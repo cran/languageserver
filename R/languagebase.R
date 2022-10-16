@@ -3,7 +3,11 @@
 
 LanguageBase <- R6::R6Class("LanguageBase",
     private = list(
-        ticket = 0
+        ticket = 0,
+
+        finalize = function() {
+            self$request_callbacks$clear()
+        }
     ),
     public = list(
         catch_callback_error = TRUE,
@@ -14,10 +18,6 @@ LanguageBase <- R6::R6Class("LanguageBase",
         initialize = function() {
             self$register_handlers()
             self$request_callbacks <- collections::dict()
-        },
-
-        finalize = function() {
-            self$request_callbacks$clear()
         },
 
         get_ticket = function() {
@@ -158,7 +158,6 @@ LanguageBase <- R6::R6Class("LanguageBase",
         },
 
         handle_notification = function(notification) {
-            logger$info("receive notification: ", notification)
             method <- notification$method
             params <- notification$params
             if (method %in% names(self$notification_handlers)) {
