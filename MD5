@@ -1,10 +1,10 @@
-88d248c51dd2bc79d7f8b1c12f42cff5 *DESCRIPTION
+ac728805193911fd3281032fcd0fbe1d *DESCRIPTION
 7677fe75c3fe8ad68f755a559fcc82b8 *LICENSE
 29048c0d0badca8c9a6110d3d3bb16bf *NAMESPACE
-907b6b7d0852718f73d75c96b94fc199 *NEWS.md
+ba6d907c989ace76f4df153ed95f1e08 *NEWS.md
 b2174ef68ca786630199c5ca3fdd7ad3 *R/call_hierarchy.R
 2eccc2ab601b347ab9b8d9952fe962ee *R/capabilities.R
-1beea2af42423f1c2efb0d24e200961e *R/code_action.R
+9ad3dbe352a427b4c1aa135934cc9fbc *R/code_action.R
 754e1473530dc8c8dac73a63819e717a *R/color.R
 c3bc5c5b679899cfba71cfd4d74ec33a *R/completion.R
 73de5cdea68acdd1402f9ebe89993fae *R/definition.R
@@ -25,7 +25,7 @@ bff15179cdd7643263475629b90ebcf9 *R/handlers-textsync.R
 03c965c6e22391cab16252ea3e535167 *R/languageserver.R
 9ca4115030c8aecf3a357c299987d608 *R/link.R
 7a559baff22436b822db4bddb90a0f0f *R/log.R
-addf6704f1e7e1d4b3c32ba1589dc4da *R/namespace.R
+32ccb22abcb1ce01ebe94dc222d16b8a *R/namespace.R
 f935574c4ebc8b3bf91f9042101c718b *R/protocol.R
 e473e3484367118d1f894d0b8681280c *R/references.R
 581635bf37547559cf9820f03fcbc0d7 *R/rename.R
@@ -33,7 +33,7 @@ e473e3484367118d1f894d0b8681280c *R/references.R
 ab480b77bddfbb0c9286290245750223 *R/selection.R
 92e3fa1244e6c504c29fd901a075210b *R/session.R
 304f371bbde34037ea756dbc0d8c6336 *R/settings.R
-946e7ad3c356c34114ec4f5d7812573c *R/signature.R
+41dc4c9fffd75aebec45da8f0105bc6f *R/signature.R
 c23663cee145098882f1df8540574ae7 *R/symbol.R
 c27af156a130f612c4c445a83d58fd64 *R/task.R
 c6ce5cc0f81aa2589b17720f94228510 *R/utils.R
@@ -51,7 +51,7 @@ b35b1fdf7bc7199040a8f519692046ef *man/run.Rd
 963a31c597be0f2899c573d3a52525fa *src/fsm.c
 4e1a4ae7ad8f709e6f23d7db75a32635 *src/fsm.h
 65240fd3189a81e2d506bfeba327ee64 *src/languageserver.c
-34062544ab85ca69071a7ff64a9e72bc *src/reader.c
+36c480aaf4944232d2d39b8c060875cc *src/reader.c
 863fc22a9b6d651fd96b044279cf8c94 *src/reader.h
 b0f0cebca0be1a9a2ca04d99a69127f8 *src/search.c
 967e5ba284a5e92fd34b109e7801d4f0 *src/search.h
@@ -60,10 +60,10 @@ b0f0cebca0be1a9a2ca04d99a69127f8 *src/search.c
 dd7859837c9e0fa81288466d4be385ad *tests/testthat.R
 1babd17edf15cf61d87b9b300d3ed134 *tests/testthat/helper-utils.R
 ebd48dbc963ae841655033fc271fc81b *tests/testthat/test-call-hierarchy.R
-5c3a723fbae888ee3344d260f6cfc6ac *tests/testthat/test-code-action.R
+5eab1d9ef024593d21f8ba7d253cdf35 *tests/testthat/test-code-action.R
 bd91cdeab59cc55d9a47072444eb8235 *tests/testthat/test-codeunits.R
 6cf2ea79159142e1cf841b76baa85968 *tests/testthat/test-color.R
-552f19cc7b7833faba81a274f894a748 *tests/testthat/test-completion.R
+d420e77eb2539e0df39614df56240c79 *tests/testthat/test-completion.R
 ac154a2cf577fa3a3c5e36a61d8e721e *tests/testthat/test-definition.R
 eed8fa017dd088996dc23976c31b738e *tests/testthat/test-folding.R
 b1f505502614bd6fae1043b8b27b7094 *tests/testthat/test-formatting.R
