@@ -1,3 +1,25 @@
+# ?Syntax
+# : can indicate :: :::
+# - can indicate <-
+# > can indicate |>
+binary_opts <- c(
+    ":", "\\$", "@", "\\^",
+    "%[^#]*%", "\\+", "-", "\\*", "/",
+    "<", ">", "=", "!", "&", "\\|", "~",
+    "\\?"
+)
+binary_opts_regex <- paste0(binary_opts, collapse = "|")
+binary_opts_ending_regex <- paste0("^[^#]*(", binary_opts_regex, ")\\s*(#.*)?$")
+incomplete_ending_regex <- paste0("^[^#]*(", binary_opts_regex, "|,)\\s*(#.*)?$")
+
+is_binary_line <- function(line) {
+    grepl(binary_opts_ending_regex, line, perl = TRUE)
+}
+
+is_incomplete_line <- function(line) {
+    grepl(incomplete_ending_regex, line, perl = TRUE)
+}
+
 #' Merge two lists
 #'
 #' @noRd
@@ -93,12 +115,28 @@ path_from_uri <- function(uri) {
     if (length(uri) == 0) {
         return(character())
     }
-    if (!startsWith(uri, "file:///")) {
+
+    if (startsWith(uri, "file:///")) {
+        start_char <- if (.Platform$OS.type == "windows") 9 else 8
+        path <- substr(uri, start_char, nchar(uri))
+    } else if (startsWith(uri, "vscode-notebook-cell:")) {
+        # Windows: vscode-notebook-cell:/c:/Users/Username/Documents/Notebooks/MyNotebook.ipynb#MyCellId
+        # Unix: vscode-notebook-cell:/home/username/Documents/Notebooks/MyNotebook.ipynb#MyCellId
+        # WSL: vscode-notebook-cell://wsl+ubuntu-20.04/home/username/Documents/Notebooks/MyNotebook.ipynb#MyCellId
+        if (.Platform$OS.type == "windows") {
+            path <- sub("^vscode-notebook-cell:/(.+)#.*$", "\\1", uri)
+        } else {
+            path <- sub("^vscode-notebook-cell:(.+)#.*$", "\\1", uri)
+            if (startsWith(path, "//")) {
+                path <- sub("^//[^/]+(/.+)$", "\\1", path)
+            }
+        }
+    } else {
         return("")
     }
+
     # URLdecode gives unknown encoding, we need to mark them as UTF-8
-    start_char <- if (.Platform$OS.type == "windows") 9 else 8
-    path <- utils::URLdecode(substr(uri, start_char, nchar(uri)))
+    path <- utils::URLdecode(path)
     Encoding(path) <- "UTF-8"
     path
 }
@@ -276,6 +314,7 @@ code_point_from_unit <- function(line, units) {
 #'
 #' @noRd
 code_point_to_unit <- function(line, pts) {
+    pts[pts < 0] <- 0
     if (!nzchar(line)) return(pts)
     offsets <- c(0, cumsum(ncodeunit(strsplit(line, "")[[1]])))
     result <- offsets[pts + 1]

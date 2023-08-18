@@ -1,8 +1,8 @@
 Type: Package
 Package: languageserver
 Title: Language Server Protocol
-Version: 0.3.15
-Date: 2023-01-05
+Version: 0.3.16
+Date: 2023-08-17
 Authors@R: 
     c(person(given = "Randy",
              family = "Lai",
@@ -24,16 +24,16 @@ Imports: callr (>= 3.0.0), collections (>= 0.3.0), fs (>= 1.3.1),
         roxygen2 (>= 7.0.0), stringi (>= 1.1.7), styler (>= 1.5.1),
         tools, utils, xml2 (>= 1.2.2), xmlparsedata (>= 1.0.3)
 Suggests: covr (>= 3.4.0), magrittr (>= 1.5), mockery (>= 0.4.2),
-        processx (>= 3.4.1), purrr (>= 0.3.3), testthat (>= 2.1.0),
-        withr (>= 2.3.0), rmarkdown (>= 2.0)
+        pacman, processx (>= 3.4.1), purrr (>= 0.3.3), testthat (>=
+        2.1.0), withr (>= 2.3.0), rmarkdown (>= 2.0)
 ByteCompile: yes
 Encoding: UTF-8
 NeedsCompilation: yes
 RoxygenNote: 7.2.1
 Config/testthat/edition: 3
-Packaged: 2023-01-06 17:59:41 UTC; randylai
+Packaged: 2023-08-18 04:06:53 UTC; randylai
 Author: Randy Lai [aut, cre],
   Kun Ren [ctb]
 Maintainer: Randy Lai <randy.cs.lai@gmail.com>
 Repository: CRAN
-Date/Publication: 2023-01-06 22:10:05 UTC
+Date/Publication: 2023-08-18 04:22:32 UTC

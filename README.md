@@ -1,12 +1,11 @@
 # languageserver: An implementation of the Language Server Protocol for R
 
-[![Gitter](https://badges.gitter.im/REditorSupport/community.svg)](https://gitter.im/REditorSupport/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
-[![Build Status](https://travis-ci.org/REditorSupport/languageserver.svg?branch=master)](https://travis-ci.org/REditorSupport/languageserver)
+[![Gitter](https://badges.gitter.im/REditorSupport/community.svg)](https://app.gitter.im/#/room/#REditorSupport_community:gitter.im?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
 [![Github Action](https://github.com/REditorSupport/languageserver/workflows/build/badge.svg?branch=master)](https://github.com/REditorSupport/languageserver)
 [![codecov](https://codecov.io/gh/REditorSupport/languageserver/branch/master/graph/badge.svg)](https://app.codecov.io/gh/REditorSupport/languageserver)
 [![CRAN\_Status\_Badge](http://www.r-pkg.org/badges/version/languageserver)](https://cran.r-project.org/package=languageserver)
 [![CRAN Downloads](http://cranlogs.r-pkg.org/badges/grand-total/languageserver)](https://cran.r-project.org/package=languageserver)
-[![r-universe](https://reditorsupport.r-universe.dev/badges/languageserver)](https://reditorsupport.r-universe.dev/ui#package:languageserver)
+[![r-universe](https://reditorsupport.r-universe.dev/badges/languageserver)](https://reditorsupport.r-universe.dev/ui/#package:languageserver)
 
 `languageserver` is an implementation of the Microsoft's [Language Server Protocol](https://microsoft.github.io/language-server-protocol/) for the language of R.
 
@@ -107,6 +106,8 @@ The following editors are supported by installing the corresponding extensions:
 - JupyterLab: [jupyterlab-lsp](https://github.com/jupyter-lsp/jupyterlab-lsp)
 
 - [BBEdit](https://www.barebones.com/products/bbedit/): preconfigured in version 14.0 and later; see the [BBEdit LSP support page](https://www.barebones.com/support/bbedit/lsp-notes.html) for complete details.
+
+- [Nova](https://nova.app): [R-Nova](https://github.com/jonclayden/R-Nova)
 
 ## Services Implemented
 
