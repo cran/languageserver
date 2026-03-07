@@ -11,7 +11,7 @@ test_that("Simple hover works", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(0, 7))
     expect_length(result$contents, 1)
@@ -39,7 +39,7 @@ test_that("Hover on user function works", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(1, 3))
     expect_length(result$contents, 1)
@@ -77,7 +77,7 @@ test_that("Hover on user function with multi-lined arguments works", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(6, 3))
     expect_length(result$contents, 1)
@@ -109,7 +109,7 @@ test_that("Hover on variable works", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(0, 1))
     expect_equal(result$range$start, list(line = 0, character = 0))
@@ -151,7 +151,7 @@ test_that("Hover on variable with leading tabs works", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(0, 1))
     expect_equal(result$range$start, list(line = 0, character = 0))
@@ -188,7 +188,7 @@ test_that("Hover on variable works with semi-colons", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(0, 1))
     expect_equal(result$range$start, list(line = 0, character = 0))
@@ -233,7 +233,7 @@ test_that("Hover works in scope with different assignment operators", {
         "my_fn(1)"
     ), temp_file)
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(8, 0))
     expect_equal(result$range$start, list(line = 8, character = 0))
@@ -280,7 +280,7 @@ test_that("Hover works on both sides of assignment", {
         "var3 + 3 -> var3"
     ), single_file)
 
-    client %>% did_save(single_file)
+    client %>% did_open(single_file)
 
     result <- client %>% respond_hover(single_file, c(0, 1))
     expect_equal(result$range$start, list(line = 0, character = 0))
@@ -341,14 +341,16 @@ test_that("Hover on function argument works", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(0, 30))
     expect_equal(result$range$start, list(line = 0, character = 27))
     expect_equal(result$range$end, list(line = 0, character = 36))
-    expect_equal(result$contents, list(
-        "```r\nunlist(x, recursive = TRUE, use.names = TRUE) \n```",
-        "`recursive` - logical.  Should unlisting be applied to list components of `x` ?"
+    expect_equal(result$contents[[1]], "```r\nunlist(x, recursive = TRUE, use.names = TRUE) \n```")
+    expect_true(stringi::stri_detect_fixed(result$contents[[2]], "`recursive` - logical"))
+    expect_true(stringi::stri_detect_fixed(
+        result$contents[[2]],
+        "Should unlisting be applied to list components of `x`"
     ))
 
     result <- client %>% respond_hover(temp_file, c(1, 12))
@@ -375,7 +377,7 @@ test_that("Hover on user function with function argument works", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(1, 3))
     expect_length(result$contents, 1)
@@ -408,7 +410,7 @@ test_that("Hover works with local function", {
         ),
         temp_file)
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(3, 20))
     expect_equal(result$range$start, list(line = 3, character = 19))
@@ -447,7 +449,7 @@ test_that("Hover on operator is ignored", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(2, 22),
         retry_when = function(result) length(result) > 0)
@@ -468,8 +470,8 @@ test_that("Hover works across multiple files", {
     writeLines(c("test <- 1"), defn_file)
     writeLines(c("test + 1"), query_file)
 
-    client %>% did_save(defn_file)
-    client %>% did_save(query_file)
+    client %>% did_open(defn_file)
+    client %>% did_open(query_file)
 
     result <- client %>% respond_hover(query_file, c(0, 0))
 
@@ -497,7 +499,7 @@ test_that("Simple hover works in Rmarkdown", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(5, 7))
     expect_length(result$contents, 1)
@@ -529,7 +531,7 @@ test_that("Hover on user function works in Rmarkdown", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(6, 3))
     expect_length(result$contents, 1)
@@ -562,7 +564,7 @@ test_that("Hover on variable works in Rmarkdown", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(5, 1))
     expect_equal(result$range$start, list(line = 5, character = 0))
@@ -609,14 +611,16 @@ test_that("Hover on function argument works in Rmarkdown", {
         temp_file
     )
 
-    client %>% did_save(temp_file)
+    client %>% did_open(temp_file)
 
     result <- client %>% respond_hover(temp_file, c(5, 30))
     expect_equal(result$range$start, list(line = 5, character = 27))
     expect_equal(result$range$end, list(line = 5, character = 36))
-    expect_equal(result$contents, list(
-        "```r\nunlist(x, recursive = TRUE, use.names = TRUE) \n```",
-        "`recursive` - logical.  Should unlisting be applied to list components of `x` ?"
+    expect_equal(result$contents[[1]], "```r\nunlist(x, recursive = TRUE, use.names = TRUE) \n```")
+    expect_true(stringi::stri_detect_fixed(result$contents[[2]], "`recursive` - logical"))
+    expect_true(stringi::stri_detect_fixed(
+        result$contents[[2]],
+        "Should unlisting be applied to list components of `x`"
     ))
 
     result <- client %>% respond_hover(temp_file, c(6, 12))

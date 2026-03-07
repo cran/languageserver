@@ -14,7 +14,7 @@ test_that("Document Symbol works", {
         ")"
     ), defn_file)
 
-    client %>% did_save(defn_file)
+    client %>% did_open(defn_file)
     result <- client %>% respond_document_symbol(defn_file)
 
     expect_setequal(result %>% map_chr(~ .$name), c("f", "g", "p", "m"))
@@ -64,7 +64,7 @@ test_that("Recognize symbols created by delayedAssign/assign/makeActiveBinding",
         "assign('assign4', 4, pos = new.env())"
     ), defn_file)
 
-    client %>% did_save(defn_file)
+    client %>% did_open(defn_file)
     result <- client %>% respond_document_symbol(defn_file)
 
     expect_setequal(
@@ -90,7 +90,7 @@ test_that("Document symbols are robust to invalid source", {
         "d1 <- 1"
     ), defn_file)
 
-    client %>% did_save(defn_file)
+    client %>% did_open(defn_file)
     result <- client %>% respond_document_symbol(defn_file)
 
     expect_setequal(
@@ -126,7 +126,7 @@ test_that("Document section symbol works", {
         ")"
     ), defn_file)
 
-    client %>% did_save(defn_file)
+    client %>% did_open(defn_file)
     result <- client %>% respond_document_symbol(defn_file)
 
     expect_setequal(
@@ -134,35 +134,35 @@ test_that("Document section symbol works", {
         c("section1", "f", "step1", "step2", "section2", "g", "p", "m")
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "section1") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "section1") %>% symbol_range(),
         range(position(0, 0), position(6, 1))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "f") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "f") %>% symbol_range(),
         range(position(1, 0), position(6, 1))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "step1") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "step1") %>% symbol_range(),
         range(position(2, 0), position(3, 7))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "step2") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "step2") %>% symbol_range(),
         range(position(4, 0), position(5, 7))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "section2") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "section2") %>% symbol_range(),
         range(position(7, 0), position(12, 1))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "g") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "g") %>% symbol_range(),
         range(position(8, 0), position(8, 26))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "p") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "p") %>% symbol_range(),
         range(position(9, 0), position(9, 6))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "m") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "m") %>% symbol_range(),
         range(position(10, 0), position(12, 1))
     )
 })
@@ -193,8 +193,8 @@ test_that("Workspace Symbol works", {
         ")"
     ), defn2_file)
 
-    client %>% did_save(defn_file)
-    client %>% did_save(defn2_file)
+    client %>% did_open(defn_file)
+    client %>% did_open(defn2_file)
 
     expected_names <- c("f1", "f2")
     result <- client %>% respond_workspace_symbol(
@@ -277,7 +277,7 @@ test_that("Document section symbol works in Rmarkdown", {
         "```"
     ), defn_file)
 
-    client %>% did_save(defn_file)
+    client %>% did_open(defn_file)
     result <- client %>% respond_document_symbol(defn_file)
 
     expect_setequal(
@@ -289,75 +289,75 @@ test_that("Document section symbol works in Rmarkdown", {
         )
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "section1") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "section1") %>% symbol_range(),
         range(position(4, 0), position(11, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "subsection1") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "subsection1") %>% symbol_range(),
         range(position(6, 0), position(11, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "f") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "f") %>% symbol_range(),
         range(position(8, 0), position(10, 1))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "section2") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "section2") %>% symbol_range(),
         range(position(12, 0), position(45, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "g") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "g") %>% symbol_range(),
         range(position(14, 0), position(14, 26))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "unnamed-chunk-1") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "unnamed-chunk-1") %>% symbol_range(),
         range(position(7, 0), position(11, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "unnamed-chunk-2") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "unnamed-chunk-2") %>% symbol_range(),
         range(position(13, 0), position(15, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "unnamed-chunk-3") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "unnamed-chunk-3") %>% symbol_range(),
         range(position(16, 0), position(18, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "chunk1") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "chunk1") %>% symbol_range(),
         range(position(19, 0), position(21, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "p") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "p") %>% symbol_range(),
         range(position(20, 0), position(20, 6))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "chunk1a") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "chunk1a") %>% symbol_range(),
         range(position(22, 0), position(24, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "chunk2") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "chunk2") %>% symbol_range(),
         range(position(25, 0), position(27, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "chunk2a") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "chunk2a") %>% symbol_range(),
         range(position(28, 0), position(30, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "chunk3") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "chunk3") %>% symbol_range(),
         range(position(31, 0), position(33, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "chunk3a") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "chunk3a") %>% symbol_range(),
         range(position(34, 0), position(36, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "chunk4, new") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "chunk4, new") %>% symbol_range(),
         range(position(37, 0), position(39, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "unnamed-chunk-4") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "unnamed-chunk-4") %>% symbol_range(),
         range(position(40, 0), position(42, 3))
     )
     expect_equivalent(
-        result %>% detect(~ .$name == "chunk5") %>% pluck("location", "range"),
+        result %>% detect(~ .$name == "chunk5") %>% symbol_range(),
         range(position(43, 0), position(45, 3))
     )
 })

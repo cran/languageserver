@@ -23,7 +23,8 @@ text_document_did_open <- function(self, params) {
     doc <- Document$new(uri, language = language, version = version, content = content)
     self$workspace$documents$set(uri, doc)
     doc$did_open()
-    self$text_sync(uri, document = doc, run_lintr = TRUE, parse = TRUE)
+    # Performance: Parse immediately on open (no delay) to have data ready for initial requests
+    self$text_sync(uri, document = doc, run_lintr = TRUE, parse = TRUE, delay = 0)
 }
 
 #' `textDocument/didChange` notification handler
@@ -66,6 +67,13 @@ text_document_did_save <- function(self, params) {
     text <- params[["text"]]
     uri <- uri_escape_unicode(textDocument[["uri"]])
     logger$info("did save:", list(uri = uri))
+
+    # https://github.com/microsoft/language-server-protocol/issues/2110
+    # follow dbaeumer's take on not handling files that weren't claimed before didSave
+    if (!self$workspace$documents$has(uri)) {
+        return(NULL)
+    }
+
     path <- path_from_uri(uri)
     if (!is.null(text)) {
         content <- stringi::stri_split_lines(text)[[1]]
@@ -74,13 +82,8 @@ text_document_did_save <- function(self, params) {
     } else {
         content <- NULL
     }
-    if (self$workspace$documents$has(uri)) {
-        doc <- self$workspace$documents$get(uri)
-        doc$set_content(doc$version, content)
-    } else {
-        doc <- Document$new(uri, language = NULL, version = NULL, content = content)
-        self$workspace$documents$set(uri, doc)
-    }
+    doc <- self$workspace$documents$get(uri)
+    doc$set_content(doc$version, content)
     doc$did_open()
     self$text_sync(uri, document = doc, run_lintr = TRUE, parse = TRUE)
 }
