@@ -6,8 +6,12 @@ LanguageClient <- R6::R6Class("LanguageClient",
         read_char_buf = raw(0),
 
         finalize = function() {
-            if (!is.null(self$process)) {
-                self$process$kill_tree()
+            if (!is.null(self$process) && self$process$is_alive()) {
+                if (identical(Sys.getenv("R_COVR"), "true")) {
+                    self$process$wait()
+                } else {
+                    self$process$kill_tree()
+                }
             }
             super$finalize()
         }
@@ -15,6 +19,7 @@ LanguageClient <- R6::R6Class("LanguageClient",
     public = list(
         process = NULL,
         rootUri = NULL,
+        workspaceFolders = NULL,
         ClientCapabilities = NULL,
         ServerCapabilities = NULL,
         diagnostics = NULL,
@@ -95,6 +100,7 @@ LanguageClient <- R6::R6Class("LanguageClient",
                     "initialize",
                     list(
                         rootUri = self$rootUri,
+                        workspaceFolders = self$workspaceFolders,
                         capabilities = self$ClientCapabilities
                     )
                 ),
@@ -104,8 +110,15 @@ LanguageClient <- R6::R6Class("LanguageClient",
             )
         },
 
-        start = function(working_dir = getwd(), capabilities = NULL) {
-            self$rootUri <- path_to_uri(working_dir)
+        start = function(working_dir = getwd(), workspace_folders = NULL, capabilities = NULL) {
+            self$rootUri <- if (is.null(working_dir)) NULL else path_to_uri(working_dir)
+            if (!is.null(workspace_folders)) {
+                self$workspaceFolders <- lapply(workspace_folders, function(dir) {
+                    list(uri = path_to_uri(dir), name = basename(dir))
+                })
+            } else {
+                self$workspaceFolders <- NULL
+            }
             self$ClientCapabilities <- capabilities
             self$welcome()
         },

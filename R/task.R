@@ -1,3 +1,4 @@
+#' @import callr
 Task <- R6::R6Class("Task",
     private = list(
         process = NULL,
@@ -148,7 +149,11 @@ TaskManager <- R6::R6Class("TaskManager",
                     if (is.null(idle_start)) {
                         attr(session, "idle_start") <- Sys.time()
                     } else if (as.numeric(difftime(Sys.time(), idle_start, units = "secs")) > private$session_idle_timeout) {
-                        session$close()
+                         if (identical(Sys.getenv("R_COVR"), "true")) {
+                            session$close(grace = 10000)
+                         } else {
+                            session$close()
+                         }
                         private$sessions[[i]] <- NULL
                     }
                 } else {
@@ -241,7 +246,13 @@ TaskManager <- R6::R6Class("TaskManager",
             }
             if (private$use_session) {
                 for (session in private$sessions) {
-                    if (!identical(Sys.getenv("R_COVR"), "true")) {
+                    if (identical(Sys.getenv("R_COVR"), "true")) {
+                        while (session$get_state() %in% c("starting", "busy")) {
+                            session$poll_process(1000)
+                            tryCatch(session$read(), error = function(e) NULL)
+                        }
+                        session$close(grace = 10000)
+                    } else {
                         session$close()
                     }
                 }
@@ -251,9 +262,10 @@ TaskManager <- R6::R6Class("TaskManager",
 )
 
 package_call <- function(target) {
-    func <- call(":::", as.name("languageserver"), substitute(target))
-    target <- eval(substitute(function(...) func(...), list(func = func)))
-    target
+    target_name <- as.character(substitute(target))
+    eval(bquote(
+        function(...) get(.(target_name), envir = asNamespace("languageserver"))(...)
+    ), envir = baseenv())
 }
 
 create_task <- function(target, args, callback = NULL, error = NULL, delay = 0) {
