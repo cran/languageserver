@@ -36,6 +36,66 @@ test_that("Document Symbol works", {
     )
 })
 
+test_that("document symbol kinds cover scalar and class values", {
+    types <- c(
+        "logical", "integer", "double", "complex", "character", "array",
+        "list", "function", "NULL", "class", "R6", "S4", "RefClass",
+        "unknown"
+    )
+    kinds <- vapply(types, get_document_symbol_kind, numeric(1L))
+
+    expect_equal(kinds[["logical"]], SymbolKind$Boolean)
+    expect_equal(kinds[["integer"]], SymbolKind$Number)
+    expect_equal(kinds[["complex"]], SymbolKind$Number)
+    expect_equal(kinds[["character"]], SymbolKind$String)
+    expect_equal(kinds[["array"]], SymbolKind$Array)
+    expect_equal(kinds[["list"]], SymbolKind$Struct)
+    expect_equal(kinds[["function"]], SymbolKind$Function)
+    expect_equal(kinds[["NULL"]], SymbolKind$Null)
+    expect_equal(kinds[["R6"]], SymbolKind$Class)
+    expect_equal(kinds[["unknown"]], SymbolKind$Field)
+    expect_equal(get_document_symbol_kind(c("a", "b")), SymbolKind$Field)
+})
+
+test_that("hierarchical symbols attempt member extraction for classes", {
+    fixture <- provider_fixture(c(
+        "# Main ----",
+        "Widget <- 1"
+    ))
+    fixture$workspace$get_definitions_for_uri <- function(...) {
+        list(Widget = list(
+            type = "R6",
+            range = range(position(1L, 0L), position(1L, 11L))
+        ))
+    }
+    reply <- document_symbol_reply(
+        1L,
+        fixture$uri,
+        fixture$workspace,
+        fixture$document,
+        list(hierarchicalDocumentSymbolSupport = TRUE)
+    )
+
+    expect_true(any(vapply(
+        reply$result,
+        function(item) identical(item$name, "Widget"),
+        logical(1L)
+    )))
+
+    flat <- document_symbol_reply(
+        2L,
+        fixture$uri,
+        fixture$workspace,
+        fixture$document,
+        list(hierarchicalDocumentSymbolSupport = FALSE)
+    )
+    expect_true(any(vapply(
+        flat$result,
+        function(item) identical(item$name, "Main"),
+        logical(1L)
+    )))
+})
+
 test_that("Recognize symbols created by delayedAssign/assign/makeActiveBinding", {
     skip_on_cran()
     client <- language_client()
@@ -169,10 +229,9 @@ test_that("Document section symbol works", {
 
 test_that("Workspace Symbol works", {
     skip_on_cran()
-    client <- language_client()
-
-    defn_file <- withr::local_tempfile(fileext = ".R")
-    defn2_file <- withr::local_tempfile(fileext = ".R")
+    root <- withr::local_tempdir()
+    defn_file <- file.path(root, "definitions.R")
+    defn2_file <- file.path(root, "more-definitions.R")
     writeLines(c(
         "f1 <- function(x) {",
         "  x + 1",
@@ -193,6 +252,7 @@ test_that("Workspace Symbol works", {
         ")"
     ), defn2_file)
 
+    client <- language_client(root)
     client %>% did_open(defn_file)
     client %>% did_open(defn2_file)
 

@@ -12,7 +12,12 @@ definition_xpath <- paste(
 #' writes the function definition to a temporary file and returns that
 #' as the location.
 #' @noRd
-definition_reply <- function(id, uri, workspace, document, point, rootPath) {
+definition_reply <- function(id, uri, workspace, document, point, rootPath,
+    context_uri = uri) {
+
+    if (!check_r_region(document, point)) {
+        return(Response$new(id))
+    }
 
     token_result <- document$detect_token(point)
     resolved <- FALSE
@@ -33,12 +38,11 @@ definition_reply <- function(id, uri, workspace, document, point, rootPath) {
                 # symbol
                 preceding_dollar <- xml_find_first(token, "preceding-sibling::OP-DOLLAR")
                 if (length(preceding_dollar) == 0) {
-                    enclosing_scopes <- xdoc_find_enclosing_scopes(xdoc,
-                        row, col, top = TRUE)
                     xpath <- glue(definition_xpath,
                         row = row, start = token_start, end = token_end,
                         token_quote = xml_single_quote(token_text))
-                    all_defs <- xml_find_all(enclosing_scopes, xpath)
+                    all_defs <- xdoc_find_definitions(
+                        xdoc, row, col, token_text, xpath)
                     if (length(all_defs)) {
                         last_def <- all_defs[[length(all_defs)]]
                         result <- list(
@@ -86,8 +90,10 @@ definition_reply <- function(id, uri, workspace, document, point, rootPath) {
     }
 
     if (!resolved && check_scope(uri, document, point)) {
-        result <- workspace$get_definition(token_result$token, token_result$package,
-            exported_only = token_result$accessor != ":::")
+        result <- call_with_optional_uri(
+            workspace$get_definition,
+            token_result$token, token_result$package,
+            exported_only = token_result$accessor != ":::", uri = context_uri)
     }
 
     if (is.null(result)) {

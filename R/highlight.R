@@ -10,8 +10,36 @@ document_highlight_xpath <- "//*[(self::SYMBOL or self::SYMBOL_FUNCTION_CALL or 
 #'
 #' @noRd
 document_highlight_reply <- function(id, uri, workspace, document, point) {
+    if (!check_r_region(document, point)) {
+        return(Response$new(id))
+    }
+
     result <- NULL
-    xdoc <- workspace$get_parse_data(uri)$xml_doc
+    parse_data <- workspace$get_parse_data(uri)
+    index <- parse_data$reference_index
+    detected <- document$detect_token(point)
+    if (!is.null(index) && nzchar(detected$token)) {
+        token_point <- list(
+            row = detected$range$start$row,
+            col = detected$range$start$col
+        )
+        definition_key <- reference_key_at(index, token_point, detected$token)
+        if (!is.null(definition_key)) {
+            selected <- reference_indices(index, detected$token, definition_key)
+            result <- lapply(selected, function(i) {
+                list(
+                    range = range(
+                        position(index$line[[i]], index$col[[i]]),
+                        position(index$end_line[[i]], index$end_col[[i]])
+                    ),
+                    kind = DocumentHighlightKind$Text
+                )
+            })
+            return(Response$new(id, result = result))
+        }
+    }
+
+    xdoc <- parse_data$xml_doc
     if (!is.null(xdoc)) {
         row <- point$row + 1
         col <- point$col + 1

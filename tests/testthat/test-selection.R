@@ -47,6 +47,24 @@ test_that("Selection range works with single position", {
   )))))
 })
 
+test_that("Selection range resolves content adjacent to punctuation", {
+  skip_on_cran()
+  client <- language_client()
+
+  defn_file <- withr::local_tempfile(fileext = ".R")
+  writeLines('setClass("BaseEntity")', defn_file)
+
+  client %>% did_open(defn_file)
+  result <- client %>% respond_selection_range(defn_file, list(
+    list(line = 0, character = 9)
+  ))
+
+  expect_equal(result[[1]]$range, list(
+    start = list(line = 0L, character = 9L),
+    end = list(line = 0L, character = 21L)
+  ))
+})
+
 
 test_that("Selection range works with multiple positions", {
   skip_on_cran()

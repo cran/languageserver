@@ -1,3 +1,97 @@
+# languageserver 0.3.19
+
+- Add a shared Quarto/R Markdown region model with `.qmd` and Quarto language
+  ID detection, independent R-cell parsing, nested fenced-div folding, and
+  provider isolation from YAML, Markdown, cell options, and non-R engines.
+- Index complete R projects with bounded, cached shallow summaries while fully
+  parsing only packages, open files, and static `source()` closures. Keep
+  unrelated standalone scripts isolated in semantic editor features.
+- Retire persistent `callr` workers when cancelling tasks so a late interrupt
+  cannot leak into the next diagnostics run.
+- Prevent a dead persistent worker from crashing the language server when a
+  task is dispatched to its closed command pipe.
+- Keep task callback and polling failures from terminating the server or
+  permanently consuming scheduler capacity.
+- Scale persistent workers to queued demand and make task-manager shutdown
+  best-effort and idempotent.
+- Add preferred quick fixes for common `lintr` diagnostics and a conflict-aware
+  `source.fixAll` action, while making multi-line `nolint` actions apply to every
+  affected line.
+- Add previewable `refactor.extract` actions for variables and functions with
+  local free-variable analysis, plus a conservative `refactor.inline` action
+  for single-use local variables.
+- Add LSP 3.18 capability updates, including multiple-range formatting,
+  explicit UTF-16 position encoding, and the semantic token `label` type.
+- Add R-focused code lenses for function call counts, linked editing between
+  roxygen parameters and function formals, debugger inline values, and
+  parameter-name inlay hints.
+- Make parameter-name inlay hints conservative by default and open VS Code's
+  semantic call hierarchy when a function call-count lens is clicked.
+- Show function signatures and argument documentation in parameter-name inlay
+  hint tooltips, consistent with function-argument hovers.
+- Use incremental document synchronization, reject stale background results,
+  cache workspace routing, and reduce event-loop latency for more responsive
+  editing.
+- Pre-index document completion candidates during background parsing with a
+  native parse-tree traversal, bound broad result sets before constructing
+  completion items, and use deterministic native top-N selection.
+- Make on-type formatting robust for incomplete R expressions by using
+  parse-validated sentinel completion with a conservative indentation fallback.
+- Precompute semantic tokens and symbol/call indexes in parse workers, support
+  semantic-token deltas, and make range providers honor requested ranges.
+- Prioritize and supersede background work by document version, start persistent
+  workers asynchronously, keep warm workers available, and defer diagnostics
+  until the current parse is ready.
+- Bound parse and diagnostics caches by memory and reuse indexed references for
+  rename, highlights, call hierarchy, and code-lens call counts.
+- Track the last successful ordered package request for each document, avoiding
+  redundant `callr` subprocesses after transient parse errors or representation
+  changes while preserving package attachment order (#754).
+- Classify function assignment names as function semantic tokens and fix semantic token regression assertions (#756, #757).
+- Prefer `STR_CONST` in `xdoc_find_token()` at ambiguous punctuation/string boundaries (#739, #740).
+- Update documentation for Emacs Eglot setup and libuv system dependency (#732, #733).
+- Reduce provider and typing latency with native C indexes, cached provider and namespace metadata, and responsive completion during typing (#758).
+- Safely handle namespaced calls in argument default values within `extract_default_values()` (#759).
+
+**Closed issues:**
+
+- Package resolution (`resolve_attached_packages`) spawns fresh R subprocess on keystrokes in Quarto/R Markdown documents (#754)
+- `xdoc_find_token` resolves to adjacent punctuation instead of string literal at unspaced quote (#739)
+- Type hierarchy supertypes and subtypes return empty for S4 / RefClass (#738)
+- `diagnose_file`: empty path crash and `.lintr` config never applied when using `text=` argument (#722)
+- Segfault with invalid permissions in Neovim context (#721)
+- Support directory-nested R packages (monorepo support) (#619)
+- Document installation for Emacs (#354)
+- Add extract and inline refactorings (#94)
+- Extend completion with source by recursive parsing (#20)
+
+**Merged pull requests:**
+
+- Protect extract_default_values for namespaced calls (#759)
+- Reduce provider and typing latency with native indexes and serialization (#758)
+- Fix semantic token regression test assertion and update semantic (#757)
+- Classify function assignment names as function semantic tokens (#756)
+- Avoid redundant package resolution (#755)
+- Add extract and inline refactorings (#753)
+- Add Quarto and R Markdown region model (#752)
+- Add scalable project-wide R indexing (#751)
+- Improve task manager reliability (#750)
+- Fix broken pipe crash in task sessions (#749)
+- Fix diagnostics cancellation interrupt race (#748)
+- Raise test coverage above 95% (#747)
+- Improve code actions (#746)
+- Improve language server responsiveness (#745)
+- Improve inlay hint argument tooltips (#744)
+- Improve completion responsiveness (#743)
+- Make on-type formatting robust for incomplete expressions (#742)
+- Update LSP 3.18 providers and improve responsiveness (#741)
+- `xdoc_find_token()` now prefers `STR_CONST` at ambiguous punctuation/string boundaries (#740)
+- Bump actions/cache from 5 to 6 (#737)
+- Bump actions/checkout from 6 to 7 (#736)
+- Bump codecov/codecov-action from 6 to 7 (#734)
+- Added emacs eglot setup instructions (#733)
+- Added missing libuv dependency to README.md (#732)
+
 # languageserver 0.3.18
 
 **Closed issues:**

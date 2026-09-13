@@ -1,8 +1,8 @@
 Type: Package
 Package: languageserver
 Title: Language Server Protocol
-Version: 0.3.18
-Date: 2026-05-01
+Version: 0.3.19
+Date: 2026-09-11
 Authors@R: 
     c(person(given = "Randy",
              family = "Lai",
@@ -29,14 +29,14 @@ Suggests: covr (>= 3.4.0), magrittr (>= 1.5), mockery (>= 0.4.2),
 ByteCompile: yes
 Encoding: UTF-8
 NeedsCompilation: yes
-RoxygenNote: 7.3.3
 Config/testthat/edition: 3
 Config/testthat/parallel: true
 Config/Needs/development: testthat, magrittr, mockery, purrr, withr,
         rmarkdown
-Packaged: 2026-05-02 03:11:45 UTC; randylai
+Config/roxygen2/version: 8.1.0
+Packaged: 2026-09-13 03:51:26 UTC; randylai
 Author: Randy Lai [aut, cre],
   Kun Ren [ctb]
 Maintainer: Randy Lai <randy.cs.lai@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-05-02 18:40:09 UTC
+Date/Publication: 2026-09-13 04:10:02 UTC

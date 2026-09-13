@@ -472,6 +472,19 @@ respond_semantic_tokens_full <- function(client, path, ..., uri = path_to_uri(pa
     )
 }
 
+respond_semantic_tokens_delta <- function(client, path, previous_result_id,
+    ..., uri = path_to_uri(path)) {
+    respond(
+        client,
+        "textDocument/semanticTokens/full/delta",
+        list(
+            textDocument = list(uri = uri),
+            previousResultId = previous_result_id
+        ),
+        ...
+    )
+}
+
 respond_semantic_tokens_range <- function(client, path, start_pos, end_pos, ..., uri = path_to_uri(path)) {
     respond(
         client,

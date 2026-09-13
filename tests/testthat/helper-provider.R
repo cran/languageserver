@@ -1,0 +1,19 @@
+provider_fixture <- function(content, formals_resolver = function(...) NULL) {
+    uri <- "file:///provider-fixture.R"
+    document <- Document$new(uri, language = "r", version = 1L, content = content)
+    parse_data <- parse_document(uri, content)
+    parse_data$version <- document$version
+    parse_data$xml_doc <- xml2::read_xml(parse_data$xml_data)
+    document$update_parse_data(parse_data)
+
+    documents <- collections::dict()
+    documents$set(uri, document)
+    workspace <- new.env(parent = baseenv())
+    workspace$documents <- documents
+    workspace$get_parse_data <- function(request_uri) {
+        documents$get(request_uri, NULL)$parse_data
+    }
+    workspace$get_formals <- formals_resolver
+
+    list(uri = uri, document = document, workspace = workspace)
+}

@@ -88,5 +88,24 @@ on_exit <- function(self, params) {
 #' Handler to the `cancelRequest` [Notification].
 #' @noRd
 cancel_request <- function(self, params) {
-
+    request_id <- params$id
+    for (uri in self$pending_replies$keys()) {
+        queues <- self$pending_replies$get(uri)
+        for (queue in queues) {
+            retained <- list()
+            while (queue$size()) {
+                item <- queue$pop()
+                if (identical(as.character(item$id), as.character(request_id))) {
+                    self$deliver(ResponseErrorMessage$new(
+                        item$id,
+                        "RequestCancelled",
+                        "Request cancelled by client"
+                    ))
+                } else {
+                    retained[[length(retained) + 1L]] <- item
+                }
+            }
+            for (item in retained) queue$push(item)
+        }
+    }
 }

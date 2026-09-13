@@ -85,7 +85,9 @@ LanguageBase <- R6::R6Class("LanguageBase",
                     nbytes <- nbytes - nchar(newdata, type = "bytes")
                     data <- paste0(data, newdata)
                 }
-                Sys.sleep(0.01)
+                if (nbytes > 0 && length(newdata) == 0L) {
+                    Sys.sleep(0.001)
+                }
             }
             data
         },

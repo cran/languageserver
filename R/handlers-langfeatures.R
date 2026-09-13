@@ -1,3 +1,24 @@
+#' Queue only the latest expensive range-style request for a version
+#' @noRd
+enqueue_latest_reply <- function(self, uri, method, item) {
+    queue <- self$pending_replies$get(uri)[[method]]
+    retained <- list()
+    while (queue$size()) {
+        previous <- queue$pop()
+        if (isTRUE(previous$version == item$version)) {
+            self$deliver(ResponseErrorMessage$new(
+                previous$id,
+                "RequestCancelled",
+                "Request superseded by a newer request"
+            ))
+        } else {
+            retained[[length(retained) + 1L]] <- previous
+        }
+    }
+    for (previous in retained) queue$push(previous)
+    queue$push(item)
+}
+
 #' `textDocument/completion` request handler
 #'
 #' Handler to the `textDocument/completion` [Request].
@@ -157,7 +178,9 @@ text_document_code_action  <- function(self, id, params) {
         end = document$from_lsp_position(params$range$end)
     )
     context <- params$context
-    self$deliver(document_code_action_reply(id, uri, workspace, document, range, context))
+    self$deliver(document_code_action_reply(
+        id, uri, workspace, document, range, context,
+        self$ClientCapabilities))
 }
 
 #' `textDocument/codeLens` request handler
@@ -165,7 +188,19 @@ text_document_code_action  <- function(self, id, params) {
 #' Handler to the `textDocument/codeLens` [Request].
 #' @noRd
 text_document_code_lens  <- function(self, id, params) {
+    uri <- uri_escape_unicode(params$textDocument$uri)
+    workspace <- self$get_workspace(uri)
+    document <- workspace$documents$get(uri)
+    if (is.null(document)) return(self$deliver(Response$new(id = id, result = NULL)))
 
+    reply <- code_lens_reply(
+        id, uri, workspace, document, self$ClientCapabilities)
+    if (is.null(reply)) {
+        queue <- self$pending_replies$get(uri)[["textDocument/codeLens"]]
+        queue$push(list(id = id, version = document$version, params = params))
+    } else {
+        self$deliver(reply)
+    }
 }
 
 #' `codeLens/resolve` request handler
@@ -173,7 +208,9 @@ text_document_code_lens  <- function(self, id, params) {
 #' Handler to the `codeLens/resolve` [Request].
 #' @noRd
 code_lens_resolve  <- function(self, id, params) {
-
+    uri <- params$data$uri
+    workspace <- self$get_workspace(uri)
+    self$deliver(code_lens_resolve_reply(id, workspace, params))
 }
 
 
@@ -293,6 +330,24 @@ text_document_range_formatting  <- function(self, id, params) {
     )
     options <- params$options
     self$deliver(range_formatting_reply(id, uri, document, range, options))
+}
+
+#' `textDocument/rangesFormatting` request handler (LSP 3.18)
+#' @noRd
+text_document_ranges_formatting <- function(self, id, params) {
+    uri <- uri_escape_unicode(params$textDocument$uri)
+    workspace <- self$get_workspace(uri)
+    document <- workspace$documents$get(uri)
+    if (is.null(document)) return(self$deliver(Response$new(id = id, result = NULL)))
+
+    ranges <- lapply(params$ranges, function(item) {
+        list(
+            start = document$from_lsp_position(item$start),
+            end = document$from_lsp_position(item$end)
+        )
+    })
+    self$deliver(ranges_formatting_reply(
+        id, uri, document, ranges, params$options))
 }
 
 
@@ -460,7 +515,60 @@ type_hierarchy_subtypes <- function(self, id, params) {
 #' Handler to the `textDocument/linkedEditingRange` [Request].
 #' @noRd
 text_document_linked_editing_range <- function(self, id, params) {
+    uri <- uri_escape_unicode(params$textDocument$uri)
+    workspace <- self$get_workspace(uri)
+    document <- workspace$documents$get(uri)
+    if (is.null(document)) return(self$deliver(Response$new(id = id, result = NULL)))
 
+    reply <- linked_editing_range_reply(
+        id, uri, workspace, document, params$position)
+    if (is.null(reply)) {
+        queue <- self$pending_replies$get(uri)[["textDocument/linkedEditingRange"]]
+        queue$push(list(id = id, version = document$version, params = params))
+    } else {
+        self$deliver(reply)
+    }
+}
+
+#' `textDocument/inlineValue` request handler
+#' @noRd
+text_document_inline_value <- function(self, id, params) {
+    uri <- uri_escape_unicode(params$textDocument$uri)
+    workspace <- self$get_workspace(uri)
+    document <- workspace$documents$get(uri)
+    if (is.null(document)) return(self$deliver(Response$new(id = id, result = NULL)))
+
+    reply <- inline_value_reply(id, uri, workspace, document, params$range)
+    if (is.null(reply)) {
+        enqueue_latest_reply(self, uri, "textDocument/inlineValue", list(
+            id = id, version = document$version, params = params))
+    } else {
+        self$deliver(reply)
+    }
+}
+
+#' `textDocument/inlayHint` request handler
+#' @noRd
+text_document_inlay_hint <- function(self, id, params) {
+    uri <- uri_escape_unicode(params$textDocument$uri)
+    workspace <- self$get_workspace(uri)
+    document <- workspace$documents$get(uri)
+    if (is.null(document)) return(self$deliver(Response$new(id = id, result = NULL)))
+
+    reply <- inlay_hint_reply(id, uri, workspace, document, params$range)
+    if (is.null(reply)) {
+        enqueue_latest_reply(self, uri, "textDocument/inlayHint", list(
+            id = id, version = document$version, params = params))
+    } else {
+        self$deliver(reply)
+    }
+}
+
+#' `inlayHint/resolve` request handler
+#' @noRd
+inlay_hint_resolve <- function(self, id, params) {
+    workspace <- self$get_workspace(params$data$uri)
+    self$deliver(inlay_hint_resolve_reply(id, workspace, params))
 }
 
 #' `textDocument/semanticTokens/full` request handler
@@ -475,8 +583,30 @@ text_document_semantic_tokens_full <- function(self, id, params) {
     if (is.null(document)) return(self$deliver(Response$new(id = id, result = NULL)))
     reply <- semantic_tokens_full_reply(id, uri, workspace, document)
     if (is.null(reply)) {
-        queue <- self$pending_replies$get(uri)[["textDocument/semanticTokens/full"]]
-        queue$push(list(
+        enqueue_latest_reply(self, uri, "textDocument/semanticTokens/full", list(
+            id = id,
+            version = document$version,
+            params = params
+        ))
+    } else {
+        self$deliver(reply)
+    }
+}
+
+#' `textDocument/semanticTokens/full/delta` request handler
+#' @noRd
+text_document_semantic_tokens_delta <- function(self, id, params) {
+    uri <- uri_escape_unicode(params$textDocument$uri)
+    workspace <- self$get_workspace(uri)
+    document <- workspace$documents$get(uri)
+    if (is.null(document)) {
+        return(self$deliver(Response$new(id = id, result = NULL)))
+    }
+    reply <- semantic_tokens_delta_reply(
+        id, uri, workspace, document, params$previousResultId)
+    if (is.null(reply)) {
+        enqueue_latest_reply(
+            self, uri, "textDocument/semanticTokens/full/delta", list(
             id = id,
             version = document$version,
             params = params
@@ -498,8 +628,7 @@ text_document_semantic_tokens_range <- function(self, id, params) {
     if (is.null(document)) return(self$deliver(Response$new(id = id, result = NULL)))
     reply <- semantic_tokens_range_reply(id, uri, workspace, document, params$range)
     if (is.null(reply)) {
-        queue <- self$pending_replies$get(uri)[["textDocument/semanticTokens/range"]]
-        queue$push(list(
+        enqueue_latest_reply(self, uri, "textDocument/semanticTokens/range", list(
             id = id,
             version = document$version,
             params = params

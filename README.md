@@ -23,10 +23,10 @@ A few dependencies are required beforehand:
 
 ```bash
 # On Debian, Ubuntu, etc.
-apt install --assume-yes --no-install-recommends build-essential libcurl4-openssl-dev libssl-dev libxml2-dev r-base
+apt install --assume-yes --no-install-recommends build-essential libcurl4-openssl-dev libssl-dev libxml2-dev libuv1-dev r-base
 
 # On Fedora, Centos, etc.
-dnf install --assumeyes --setopt=install_weak_deps=False @development-tools libcurl-devel libxml2-devel openssl-devel R
+dnf install --assumeyes --setopt=install_weak_deps=False @development-tools libcurl-devel libxml2-devel openssl-devel libuv-devel R
 
 # On Alpine
 apk add --no-cache curl-dev g++ gcc libxml2-dev linux-headers make R R-dev
@@ -108,6 +108,14 @@ The following editors are supported by installing the corresponding extensions:
     }
     ```
 
+- Emacs: [eglot-mode](https://elpa.gnu.org/devel/doc/eglot.html) (native LSP client)
+
+    ```elisp
+    (use-package ess :ensure t)
+    (add-hook 'ess-r-mode-hook 'eglot-ensure)
+    ```
+    To check if it is working, open an R file, place the cursor on a line and run `M-x ess-eval-line`.
+
 - Emacs: [lsp-mode](https://github.com/emacs-lsp/lsp-mode)
 
 - JupyterLab: [jupyterlab-lsp](https://github.com/jupyter-lsp/jupyterlab-lsp)
@@ -132,7 +140,7 @@ The following editors are supported by installing the corresponding extensions:
 - [x] [documentSymbolProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_documentSymbol)
 - [x] [workspaceSymbolProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#workspace_symbol)
 - [x] [codeActionProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_codeAction)
-- [ ] [codeLensProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_codeLens)
+- [x] [codeLensProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_codeLens)
 - [x] [documentFormattingProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_formatting)
 - [x] [documentRangeFormattingProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_rangeFormatting)
 - [x] [documentOnTypeFormattingProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_onTypeFormatting)
@@ -151,10 +159,17 @@ The following editors are supported by installing the corresponding extensions:
 - [x] [typeHierarchySupertypes](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#typeHierarchy_supertypes)
 - [x] [typeHierarchySubtypes](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#typeHierarchy_subtypes)
 - [x] [semanticTokens](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_semanticTokens)
-- [ ] [linkedEditingRange](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_linkedEditingRange)
+- [x] [linkedEditingRange](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_linkedEditingRange)
 - [ ] [executeCommandProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#workspace_executeCommand)
-- [ ] [inlineValueProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_inlineValue)
-- [ ] [inlayHintProivder](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_inlayHint)
+- [x] [inlineValueProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_inlineValue)
+- [x] [inlayHintProvider](https://microsoft.github.io/language-server-protocol/specifications/specification-current/#textDocument_inlayHint)
+
+Inline values are a debugger-facing feature rather than normal editor
+annotations. When execution is paused, a compatible editor and debug adapter
+request variable lookup ranges from the language server, evaluate them in the
+selected stack frame, and render the resulting values beside the source. They
+have no visible effect when the client or R debug adapter does not request
+`textDocument/inlineValue`.
 
 ## Settings
 
@@ -165,10 +180,24 @@ settings | default | description
 `r.lsp.debug`  | `false` | increase verbosity for debug purpose
 `r.lsp.log_file` | `null` | file to log debug messages, fallback to stderr if empty
 `r.lsp.diagnostics` | `true` | enable file diagnostics via [lintr](https://github.com/r-lib/lintr)
+`r.lsp.inlay_hints_minimum_arguments` | `2` | minimum supplied arguments before parameter-name inlay hints are shown
+`r.lsp.inlay_hints_minimum_argument_length` | `2` | minimum argument-name length for an inlay hint, excluding an initial `.`
 `r.lsp.rich_documentation` | `true` | rich documentation with enhanced markdown features
 `r.lsp.snippet_support` | `true` | enable snippets in auto completion
 `r.lsp.max_completions` | 200 | maximum number of completion items
 `r.lsp.lint_cache` | `false` | toggle caching of lint results
+`r.lsp.parse_delay` | `0.15` | seconds to debounce parsing after an edit
+`r.lsp.diagnostics_delay` | `0.75` | seconds to debounce diagnostics after the current parse
+`r.lsp.parse_cache_max_mb` | `64` | maximum memory used by cached document parse versions
+`r.lsp.diagnostics_cache_max_mb` | `16` | maximum memory used by cached diagnostics
+`r.lsp.index_mode` | `"auto"` | index R files in the complete workspace; use `"off"` to restore package-only loading
+`r.lsp.index_include` | `"**/*.R"` | glob or character vector of globs included in workspace indexing
+`r.lsp.index_exclude` | common VCS, dependency, cache, and output directories | glob or character vector of globs excluded from workspace indexing
+`r.lsp.index_max_files` | `10000` | maximum number of eligible R files discovered per workspace
+`r.lsp.index_max_file_size_mb` | `2` | maximum size of a file included in the workspace index
+`r.lsp.index_batch_size` | `20` | maximum number of shallow summaries built in one idle batch
+`r.lsp.index_time_budget_ms` | `25` | approximate event-loop budget for each shallow-index batch
+`r.lsp.index_persistent_cache` | `true` | persist validated shallow summaries in the user cache directory
 `r.lsp.server_capabilities` | `{}` | override server capabilities defined in [capabilities.R](https://github.com/REditorSupport/languageserver/blob/master/R/capabilities.R). See FAQ below.
 `r.lsp.link_file_size_limit` | 16384 | maximum file size (in bytes) that supports document links
 
@@ -179,6 +208,14 @@ options(languageserver.snippet_support = FALSE)
 ```
 
 will turn off snippet support globally. LSP configuration settings are always overriden by `options()`.
+
+Project indexing is deliberately two-tiered. Package `R/` files, open files,
+and the transitive dependencies of static `source()` or `sys.source()` calls
+receive full semantic parsing. Other scripts receive only a lightweight symbol
+and source-call summary, so they appear in workspace symbol search without
+polluting completion, definition, references, or rename in unrelated scripts.
+Static paths built from string literals, `file.path()`, and `here::here()` are
+recognized; project code is never executed to resolve a path.
 
 ## FAQ
 

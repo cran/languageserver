@@ -79,8 +79,8 @@ diagnose_file <- function(uri, content, is_rmarkdown = FALSE, globals = NULL, ca
     }
 
     if (is_rmarkdown) {
-        # make sure Rmarkdown file has at least one block
-        if (!any(stringi::stri_detect_regex(content, "```\\{r[ ,\\}]"))) {
+        content <- purl(content, parseable_only = TRUE)
+        if (!any(nzchar(trimws(content)))) {
             return(list())
         }
     }
@@ -107,7 +107,7 @@ diagnose_file <- function(uri, content, is_rmarkdown = FALSE, globals = NULL, ca
         linters <- lintr::linters_with_defaults()
     }
 
-    if (file.exists(path)) {
+    if (file.exists(path) && !is_rmarkdown) {
         lints <- lintr::lint(path,
             cache = cache,
             text = content,
@@ -131,6 +131,15 @@ diagnose_file <- function(uri, content, is_rmarkdown = FALSE, globals = NULL, ca
 diagnostics_callback <- function(self, uri, version, diagnostics) {
     workspace <- self$get_workspace(uri)
     if (is.null(diagnostics) || !workspace$documents$has(uri) || !lsp_settings$get("diagnostics")) return(NULL)
+    document <- workspace$documents$get(uri)
+    if (!is.null(version) && !identical(document$version, version)) {
+        logger$info("diagnostics_callback: discarded stale result", list(
+            uri = uri,
+            result_version = version,
+            document_version = document$version
+        ))
+        return(NULL)
+    }
 
     logger$info("diagnostics_callback called:", list(
         uri = uri,
@@ -147,6 +156,20 @@ diagnostics_callback <- function(self, uri, version, diagnostics) {
             )
         )
     )
+}
+
+#' Queue diagnostics after the current parse has completed
+#' @noRd
+schedule_diagnostics <- function(self, uri, document, delay = 0) {
+    if (!lsp_settings$get("diagnostics")) return(NULL)
+    temp_root <- dirname(tempdir())
+    if (path_has_parent(self$rootPath, temp_root) ||
+            !path_has_parent(path_from_uri(uri), temp_root)) {
+        self$diagnostics_task_manager$add_task(
+            uri,
+            diagnostics_task(self, uri, document, delay = delay)
+        )
+    }
 }
 
 
@@ -173,20 +196,13 @@ diagnostics_task <- function(self, uri, document, delay = 0) {
         }
     }
 
-    is_package <- is_package(workspace$root)
-    globals <- NULL
-
-    if (is_package) {
-        globals <- new.env(parent = emptyenv())
-        for (doc in workspace$documents$values()) {
-            if (dirname(path_from_uri(doc$uri)) != file.path(workspace$root, "R")) next
-            parse_data <- doc$parse_data
-            if (is.null(parse_data)) next
-            for (symbol in parse_data$nonfuncts) {
-                globals[[symbol]] <- NULL
-            }
-            list2env(parse_data$functions, globals)
-        }
+    globals <- if (!is.null(workspace$index) &&
+            isTRUE(workspace$index$enabled)) {
+        workspace$get_diagnostics_globals(uri)
+    } else if (is_package(workspace$root)) {
+        workspace$get_diagnostics_globals()
+    } else {
+        NULL
     }
 
     create_task(
@@ -204,13 +220,6 @@ diagnostics_task <- function(self, uri, document, delay = 0) {
                     time = Sys.time(),
                     diagnostics = result
                 ))
-                # Keep cache bounded
-                if (workspace$diagnostics_cache$size() > 100) {
-                    keys <- workspace$diagnostics_cache$keys()
-                    for (key in keys[1:50]) {
-                        workspace$diagnostics_cache$remove(key)
-                    }
-                }
             }
             diagnostics_callback(self, uri, version, result)
         },

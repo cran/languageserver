@@ -77,6 +77,17 @@ capture_print <- function(x) {
     paste0(utils::capture.output(print(x)), collapse = "\n")
 }
 
+#' Call a workspace method with URI context when the implementation supports it
+#' @noRd
+call_with_optional_uri <- function(fun, ..., uri = NULL) {
+    args <- list(...)
+    parameters <- names(formals(fun))
+    if (!is.null(uri) && ("uri" %in% parameters || "..." %in% parameters)) {
+        args$uri <- uri
+    }
+    do.call(fun, args)
+}
+
 get_expr_type <- function(expr) {
     if (is.call(expr)) {
         func <- deparse(expr[[1]], nlines = 1)
@@ -127,13 +138,12 @@ path_from_uri <- function(uri) {
         # Windows: vscode-notebook-cell:/c:/Users/Username/Documents/Notebooks/MyNotebook.ipynb#MyCellId
         # Unix: vscode-notebook-cell:/home/username/Documents/Notebooks/MyNotebook.ipynb#MyCellId
         # WSL: vscode-notebook-cell://wsl+ubuntu-20.04/home/username/Documents/Notebooks/MyNotebook.ipynb#MyCellId
-        if (.Platform$OS.type == "windows") {
-            path <- sub("^vscode-notebook-cell:/(.+)#.*$", "\\1", uri)
-        } else {
-            path <- sub("^vscode-notebook-cell:(.+)#.*$", "\\1", uri)
-            if (startsWith(path, "//")) {
-                path <- sub("^//[^/]+(/.+)$", "\\1", path)
-            }
+        path <- sub("^vscode-notebook-cell:(.+)#.*$", "\\1", uri)
+        if (startsWith(path, "//")) {
+            path <- sub("^//[^/]+(/.+)$", "\\1", path)
+        } else if (.Platform$OS.type == "windows" &&
+                grepl("^/[[:alpha:]]:/", path)) {
+            path <- substring(path, 2L)
         }
     } else {
         return("")
@@ -201,11 +211,34 @@ equal_definition <- function(x, y) {
     x$uri == y$uri && equal_range(x$range, y$range)
 }
 
-#' Check if a file is an RMarkdown file
+#' Check if a language id denotes an R Markdown or Quarto document
 #' @noRd
-is_rmarkdown <- function(uri) {
+is_literate_language <- function(language) {
+    if (is.null(language) || !length(language) || is.na(language[[1L]])) {
+        return(FALSE)
+    }
+    language <- tolower(language[[1L]])
+    language %in% c(
+        "rmd", "rmarkdown", "r-markdown",
+        "qmd", "quarto", "quarto-markdown", "quarto_markdown"
+    ) || grepl("^quarto(?:[-_]?markdown)?$", language, perl = TRUE)
+}
+
+#' Check if a file is an R Markdown or Quarto file
+#' @noRd
+is_rmarkdown <- function(uri, language = NULL) {
     filename <- path_from_uri(uri)
-    endsWith(tolower(filename), ".rmd") || endsWith(tolower(filename), ".rmarkdown")
+    extension_match <- endsWith(tolower(filename), ".rmd") ||
+        endsWith(tolower(filename), ".rmarkdown") ||
+        endsWith(tolower(filename), ".qmd")
+    extension_match || is_literate_language(language)
+}
+
+#' Check if a point is in an R region
+#' @noRd
+check_r_region <- function(document, point) {
+    !document$is_rmarkdown ||
+        !is.null(literate_r_cell_at(document$regions, point$row))
 }
 
 #' Check if a token is in a R code block in an Rmarkdown file
@@ -216,20 +249,7 @@ is_rmarkdown <- function(uri) {
 #'
 #' @noRd
 check_scope <- function(uri, document, point) {
-    if (document$is_rmarkdown) {
-        row <- point$row
-        flags <- startsWith(document$content[1:(row + 1)], "```")
-        if (any(flags)) {
-            last_match <- document$content[max(which(flags))]
-            stringi::stri_detect_regex(last_match, "```+\\s*\\{[rR][ ,\\}]") &&
-                !identical(sum(flags) %% 2, 0) &&
-                !enclosed_by_quotes(document, point)
-        } else {
-            FALSE
-        }
-    } else {
-        !enclosed_by_quotes(document, point)
-    }
+    check_r_region(document, point) && !enclosed_by_quotes(document, point)
 }
 
 is_ascii_string <- function(x) {
@@ -271,28 +291,7 @@ seq_safe <- function(a, b) {
 #' Extract the R code blocks of a Rmarkdown file
 #' @noRd
 extract_blocks <- function(content) {
-    begins_or_ends <- which(stringi::stri_detect_fixed(content, "```"))
-    begins <- which(stringi::stri_detect_regex(content, "```+\\s*\\{[rR][ ,\\}]"))
-    ends <- setdiff(begins_or_ends, begins)
-    blocks <- vector("list", length(begins))
-    idx <- 0L
-    for (begin in begins) {
-        z <- which(ends > begin)
-        if (length(z) == 0) break
-        end <- ends[min(z)]
-        lines <- seq_safe(begin + 1, end - 1)
-        if (length(lines) > 0) {
-            idx <- idx + 1L
-            blocks[[idx]] <- list(lines = lines, text = content[lines])
-        }
-    }
-    if (idx == 0L) {
-        return(list())
-    }
-    if (idx < length(blocks)) {
-        blocks <- blocks[seq_len(idx)]
-    }
-    blocks
+    literate_r_blocks(content)
 }
 
 get_signature <- function(symbol, expr) {
@@ -306,13 +305,8 @@ get_signature <- function(symbol, expr) {
 #' Strip out all the non R blocks in a R markdown file
 #' @param content a character vector
 #' @noRd
-purl <- function(content) {
-    blocks <- extract_blocks(content)
-    rmd_content <- rep("", length(content))
-    for (block in blocks) {
-        rmd_content[block$lines] <- content[block$lines]
-    }
-    rmd_content
+purl <- function(content, parseable_only = FALSE) {
+    literate_r_content(content, parseable_only = parseable_only)
 }
 
 
@@ -584,13 +578,13 @@ get_help_rd <- function(hfile) {
 get_help <- function(hfile, format = c("html", "text")) {
     format <- match.arg(format)
 
-    rd <- get_help_rd(hfile)
     paths <- as.character(hfile)
 
     if (length(paths) == 0) {
         return(NULL)
     }
 
+    rd <- get_help_rd(hfile)
     pkgname <- basename(dirname(dirname(paths[[1]])))
 
     if (format == "html") {
@@ -644,22 +638,138 @@ glue <- function(.x, ...) {
     .x
 }
 
+xdoc_top_level_index <- function(x) {
+    nodes <- xml_children(x)
+    nodes <- nodes[xml_name(nodes) == "expr"]
+    # An explicit descendant axis avoids libxml2 repeatedly merging terminal
+    # node sets for //*, which becomes quadratic in long, flat scripts.
+    tokens <- xml_find_all(x, "descendant-or-self::*[@line1 and not(*)]")
+    token_line1 <- as.integer(xml_attr(tokens, "line1"))
+    token_col1 <- as.integer(xml_attr(tokens, "col1"))
+    token_line2 <- as.integer(xml_attr(tokens, "line2"))
+    token_col2 <- as.integer(xml_attr(tokens, "col2"))
+    # XML from the parser lists terminal tokens in source order. Check the
+    # non-overlap invariant once so hand-built XML can use the XPath fallback.
+    previous <- seq_len(max(length(tokens) - 1L, 0L))
+    following <- previous + 1L
+    ordered <- !anyNA(c(token_line1, token_col1, token_line2, token_col2)) &&
+        all(token_line2[previous] < token_line1[following] |
+            token_line2[previous] == token_line1[following] &
+                token_col2[previous] < token_col1[following])
+    assignment_symbol <- paste(
+        "(LEFT_ASSIGN | EQ_ASSIGN)/preceding-sibling::expr[count(*)=1]/SYMBOL",
+        "RIGHT_ASSIGN/following-sibling::expr[count(*)=1]/SYMBOL",
+        sep = " | "
+    )
+    definitions <- xml_find_all(x, paste0("//*[", assignment_symbol, "]"))
+    definition_names <- xml_text(xml_find_first(definitions, assignment_symbol))
+    list(
+        nodes = nodes,
+        line1 = as.integer(xml_attr(nodes, "line1")),
+        col1 = as.integer(xml_attr(nodes, "col1")),
+        line2 = as.integer(xml_attr(nodes, "line2")),
+        col2 = as.integer(xml_attr(nodes, "col2")),
+        definitions = definitions,
+        definitions_by_name = list2env(
+            split(seq_along(definition_names), definition_names),
+            hash = TRUE, parent = emptyenv()
+        ),
+        tokens = if (ordered) list(
+            nodes = tokens,
+            line1 = token_line1,
+            col1 = token_col1,
+            line2 = token_line2,
+            col2 = token_col2,
+            is_string = xml_name(tokens) == "STR_CONST"
+        )
+    )
+}
+
 xdoc_find_enclosing_scopes <- function(x, line, col, top = FALSE) {
-    if (top) {
-        xpath <- "/exprlist | //expr[(@line1 < {line} or (@line1 = {line} and @col1 <= {col})) and
-                (@line2 > {line} or (@line2 = {line} and @col2 >= {col}-1))]"
+    index <- attr(x, "top_level_index", exact = TRUE)
+    condition <- paste(
+        "(@line1 < {line} or (@line1 = {line} and @col1 <= {col})) and",
+        "(@line2 > {line} or (@line2 = {line} and @col2 >= {col}-1))"
+    )
+    condition <- glue(condition, line = line, col = col)
+
+    if (is.null(index)) {
+        xpath <- paste0(
+            "/exprlist/expr[", condition,
+            "]/descendant-or-self::expr[", condition, "]"
+        )
+        scopes <- xml_find_all(x, xpath)
     } else {
-        xpath <- "//expr[(@line1 < {line} or (@line1 = {line} and @col1 <= {col})) and
-                (@line2 > {line} or (@line2 = {line} and @col2 >= {col}-1))]"
+        selected <-
+            (index$line1 < line |
+                index$line1 == line & index$col1 <= col) &
+            (index$line2 > line |
+                index$line2 == line & index$col2 >= col - 1L)
+        scopes <- xml_find_all(index$nodes[selected],
+            paste0("descendant-or-self::expr[", condition, "]"))
     }
-    xpath <- glue(xpath, line = line, col = col)
-    xml_find_all(x, xpath)
+
+    if (top) {
+        root <- xml_find_all(x, "/exprlist")
+        structure(c(unclass(root), unclass(scopes)), class = "xml_nodeset")
+    } else {
+        scopes
+    }
+}
+
+xdoc_find_definitions <- function(x, line, col, name, xpath) {
+    index <- attr(x, "top_level_index", exact = TRUE)
+    if (is.null(index$definitions_by_name)) {
+        scopes <- xdoc_find_enclosing_scopes(x, line, col, top = TRUE)
+        return(xml_find_all(scopes, xpath))
+    }
+    selected <- get0(name, envir = index$definitions_by_name,
+        inherits = FALSE, ifnotfound = integer())
+    scopes <- xdoc_find_enclosing_scopes(x, line, col)
+    contexts <- structure(
+        c(unclass(index$definitions[selected]), unclass(scopes)),
+        class = "xml_nodeset"
+    )
+    # The global root supplies assignment expressions in document order.
+    # Formal parameters and for variables come from enclosing scopes. With
+    # those contexts indexed, retain the original predicates and ordering
+    # while avoiding repeated descendant scans through unrelated functions.
+    shallow_xpath <- gsub(
+        "(* | descendant-or-self::expr | descendant-or-self::expr_or_assign_or_help)",
+        "(* | self::expr | self::expr_or_assign_or_help)",
+        xpath, fixed = TRUE
+    )
+    xml_find_all(contexts, shallow_xpath)
 }
 
 xdoc_find_token <- function(x, line, col) {
+    index <- attr(x, "top_level_index", exact = TRUE)$tokens
+    if (!is.null(index)) {
+        selected <- .Call(
+            "navigation_find_token_c", PACKAGE = "languageserver",
+            index$line1, index$col1, index$line2, index$col2,
+            index$is_string, as.integer(c(line, col))
+        )
+        if (selected > 0L) return(index$nodes[[selected]])
+        return(xml_find_first(x, "/*[false()]"))
+    }
     xpath <- glue("//*[not(*)][(@line1 < {line} or (@line1 = {line} and @col1 <= {col})) and (@line2 > {line} or (@line2 = {line} and @col2 >= {col}-1))]",
         line = line, col = col)
-    xml_find_first(x, xpath)
+    tokens <- xml_find_all(x, xpath)
+    if (!length(tokens)) {
+        return(xml_find_first(x, xpath))
+    }
+
+    # A cursor at the boundary before a string literal can match both the
+    # literal and the preceding punctuation. Prefer the string in this case,
+    # while retaining document order for other token boundaries.
+    token_names <- xml_name(tokens)
+    is_string <- token_names == "STR_CONST"
+    if (any(is_string)) {
+        return(tokens[is_string][[1]])
+    }
+
+    tokens[[1]]
 }
 
 xml_single_quote <- function(x) {

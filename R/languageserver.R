@@ -27,6 +27,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
         exit_flag = NULL,
         documents = NULL,
         workspaces = NULL,
+        workspace_cache = NULL,
         processId = NULL,
         rootUri = NULL,
         rootPath = NULL,
@@ -57,11 +58,14 @@ LanguageServer <- R6::R6Class("LanguageServer",
 
             self$parse_task_manager <- TaskManager$new(
                 "parse",
-                use_session = TRUE, process_recent_first = TRUE
+                use_session = TRUE, process_recent_first = TRUE,
+                cpu_load = 0.5, max_running_tasks = 4,
+                cancellation_grace = 0.1
             )
             self$diagnostics_task_manager <- TaskManager$new(
                 "diagnostics",
-                use_session = TRUE, process_recent_first = TRUE
+                use_session = TRUE, process_recent_first = TRUE,
+                cpu_load = 0.25, max_running_tasks = 2
             )
 
             # no pool for resolve task
@@ -70,17 +74,27 @@ LanguageServer <- R6::R6Class("LanguageServer",
 
             self$pending_replies <- collections::dict()
             self$workspaces <- collections::dict()
+            self$workspace_cache <- collections::dict()
             self$workspaces$set(DEFAULT_WORKSPACE, Workspace$new(NULL))
 
             super$initialize()
         },
         process_events = function() {
-            self$diagnostics_task_manager$run_tasks()
-            self$diagnostics_task_manager$check_tasks()
-            self$parse_task_manager$run_tasks()
             self$parse_task_manager$check_tasks()
-            self$resolve_task_manager$run_tasks()
+            self$diagnostics_task_manager$check_tasks()
             self$resolve_task_manager$check_tasks()
+            # Start latency-sensitive parse work before diagnostics.
+            self$parse_task_manager$run_tasks()
+            if (!self$parse_task_manager$has_work()) {
+                for (workspace in self$workspaces$values()) {
+                    if (!is.null(workspace$index) &&
+                            isTRUE(workspace$index$enabled)) {
+                        workspace$index$process_batch()
+                    }
+                }
+                self$diagnostics_task_manager$run_tasks()
+            }
+            self$resolve_task_manager$run_tasks()
             for (workspace in self$workspaces$values()) {
                 workspace$poll_namespace_file()
             }
@@ -102,6 +116,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
                         }
                     }
                 }
+                self$workspace_cache$clear()
             }
         },
         remove_workspace = function(uri) {
@@ -119,6 +134,7 @@ LanguageServer <- R6::R6Class("LanguageServer",
                     }
                 }
                 self$workspaces$remove(key)
+                self$workspace_cache$clear()
             }
         },
         get_workspace = function(uri) {
@@ -131,6 +147,10 @@ LanguageServer <- R6::R6Class("LanguageServer",
 
             if (length(uri) == 0) {
                 return(fallback)
+            }
+
+            if (self$workspace_cache$has(uri)) {
+                return(self$workspace_cache$get(uri))
             }
 
             path <- path_from_uri(uri)
@@ -149,60 +169,180 @@ LanguageServer <- R6::R6Class("LanguageServer",
             }
 
             if (is.null(best_match)) {
+                self$workspace_cache$set(uri, fallback)
                 return(fallback)
             }
 
+            self$workspace_cache$set(uri, best_match)
             best_match
         },
+        load_index_document = function(workspace, uri) {
+            if (workspace$documents$has(uri)) return(invisible(NULL))
+            path <- path_from_uri(uri)
+            if (!file.exists(path) || dir.exists(path)) return(invisible(NULL))
+            content <- tryCatch(stringi::stri_read_lines(path),
+                error = function(e) NULL)
+            if (is.null(content)) return(invisible(NULL))
+            doc <- Document$new(
+                uri, language = "r", version = NULL, content = content)
+            workspace$documents$set(uri, doc)
+            self$text_sync(uri, document = doc, parse = TRUE)
+            invisible(doc)
+        },
+
+        refresh_index_documents = function(workspace, entry_uri = NULL) {
+            index <- workspace$index
+            if (is.null(index) || !isTRUE(index$enabled)) return(invisible(NULL))
+            entries <- if (is.null(entry_uri)) {
+                Filter(function(uri) {
+                    doc <- workspace$documents$get(uri, NULL)
+                    !is.null(doc) && isTRUE(doc$is_open)
+                }, workspace$documents$keys())
+            } else {
+                entry_uri
+            }
+            for (entry in entries) {
+                entry_key <- index_canonical_uri(entry)
+                queue <- collections::queue()
+                queue$push(entry_key)
+                visited <- new.env(hash = TRUE, parent = emptyenv())
+                while (queue$size()) {
+                    uri <- queue$pop()
+                    if (exists(uri, envir = visited, inherits = FALSE)) next
+                    assign(uri, TRUE, envir = visited)
+                    if (!index$summaries$has(uri)) {
+                        index$update_path(path_from_uri(uri))
+                    }
+                    if (!identical(uri, entry_key)) {
+                        self$load_index_document(workspace, uri)
+                    }
+                    for (target in index$source_edges$get(uri, character())) {
+                        queue$push(target)
+                    }
+                }
+            }
+            self$prune_index_documents(workspace)
+            invisible(NULL)
+        },
+
+        prune_index_documents = function(workspace) {
+            index <- workspace$index
+            if (is.null(index) || !isTRUE(index$enabled)) return(invisible(NULL))
+            document_uris <- workspace$documents$keys()
+            open_uris <- Filter(function(uri) {
+                isTRUE(workspace$documents$get(uri)$is_open)
+            }, document_uris)
+            keep <- union(index$package_source_uris(), open_uris)
+            for (uri in open_uris) keep <- union(keep, index$source_closure(uri))
+            keep <- unique(vapply(keep, index_canonical_uri, character(1L)))
+            remove <- document_uris[!vapply(document_uris, function(uri) {
+                index_canonical_uri(uri) %in% keep
+            }, logical(1L))]
+            remove <- Filter(function(uri) {
+                index$contains_path(path_from_uri(uri))
+            }, remove)
+            for (uri in remove) {
+                diagnostics_callback(self, uri, NULL, list())
+                workspace$documents$remove(uri)
+            }
+            if (length(remove)) {
+                workspace$diagnostics_globals_cache <- NULL
+                workspace$type_hierarchy_cache$clear()
+                workspace$update_loaded_packages()
+            }
+            invisible(NULL)
+        },
+
+        prune_legacy_documents = function(workspace) {
+            source_dir <- if (is_package(workspace$root)) {
+                index_normalize_path(file.path(workspace$root, "R"))
+            } else {
+                NULL
+            }
+            remove <- Filter(function(uri) {
+                doc <- workspace$documents$get(uri)
+                if (isTRUE(doc$is_open)) return(FALSE)
+                path <- index_normalize_path(path_from_uri(uri))
+                is.null(source_dir) || !identical(dirname(path), source_dir)
+            }, workspace$documents$keys())
+            for (uri in remove) {
+                diagnostics_callback(self, uri, NULL, list())
+                workspace$documents$remove(uri)
+            }
+            if (length(remove)) {
+                workspace$diagnostics_globals_cache <- NULL
+                workspace$type_hierarchy_cache$clear()
+                workspace$update_loaded_packages()
+            }
+            invisible(NULL)
+        },
+
         load_workspace = function(workspace) {
-            if (!is_package(workspace$root)) {
+            if (is.null(workspace$index) || !isTRUE(workspace$index$enabled)) {
+                if (is_package(workspace$root)) {
+                    source_dir <- file.path(workspace$root, "R")
+                    files <- list.files(
+                        source_dir, pattern = "\\.r$", ignore.case = TRUE)
+                    for (file in files) {
+                        self$load_index_document(
+                            workspace,
+                            path_to_uri(file.path(source_dir, file))
+                        )
+                    }
+                    workspace$import_from_namespace_file()
+                }
                 return(invisible(NULL))
             }
             logger$info("load workspace:", workspace$root)
-            source_dir <- file.path(workspace$root, "R")
-            files <- list.files(source_dir, pattern = "\\.r$", ignore.case = TRUE)
-            for (f in files) {
-                logger$info("load file:", f)
-                path <- file.path(source_dir, f)
-                uri <- path_to_uri(path)
-                doc <- Document$new(uri, language = "r", version = NULL, content = stringi::stri_read_lines(path))
-                workspace$documents$set(uri, doc)
-                self$text_sync(uri, document = doc, parse = TRUE)
+            workspace$index$discover()
+            for (uri in workspace$index$package_source_uris()) {
+                logger$info("load package file:", path_from_uri(uri))
+                if (!workspace$index$summaries$has(uri)) {
+                    workspace$index$update_path(path_from_uri(uri))
+                }
+                self$load_index_document(workspace, uri)
             }
-            workspace$import_from_namespace_file()
+            if (is_package(workspace$root)) workspace$import_from_namespace_file()
         },
         load_workspaces = function() {
             for (workspace in self$workspaces$values()) {
                 self$load_workspace(workspace)
             }
         },
-        text_sync = function(uri, document, run_lintr = FALSE, parse = FALSE, delay = 0) {
+        text_sync = function(uri, document, run_lintr = FALSE, parse = FALSE,
+            delay = 0, parse_delay = delay,
+            diagnostics_delay = delay) {
             if (!self$pending_replies$has(uri)) {
                 self$pending_replies$set(uri, list(
                     `textDocument/documentSymbol` = collections::queue(),
                     `textDocument/foldingRange` = collections::queue(),
                     `textDocument/documentLink` = collections::queue(),
                     `textDocument/documentColor` = collections::queue(),
+                    `textDocument/codeLens` = collections::queue(),
+                    `textDocument/linkedEditingRange` = collections::queue(),
+                    `textDocument/inlineValue` = collections::queue(),
+                    `textDocument/inlayHint` = collections::queue(),
                     `textDocument/semanticTokens/full` = collections::queue(),
+                    `textDocument/semanticTokens/full/delta` = collections::queue(),
                     `textDocument/semanticTokens/range` = collections::queue()
                 ))
             }
 
             if (run_lintr && lsp_settings$get("diagnostics")) {
-                temp_root <- dirname(tempdir())
-                if (path_has_parent(self$rootPath, temp_root) ||
-                    !path_has_parent(path_from_uri(uri), temp_root)) {
-                    self$diagnostics_task_manager$add_task(
-                        uri,
-                        diagnostics_task(self, uri, document, delay = delay)
-                    )
+                if (parse) {
+                    self$diagnostics_task_manager$cancel(uri)
+                    document$pending_diagnostics <- TRUE
+                    document$diagnostics_delay <- diagnostics_delay
+                } else {
+                    schedule_diagnostics(
+                        self, uri, document, delay = diagnostics_delay)
                 }
             }
 
             if (parse) {
                 self$parse_task_manager$add_task(
                     uri,
-                    parse_task(self, uri, document, delay = delay)
+                    parse_task(self, uri, document, delay = parse_delay)
                 )
             }
         },
@@ -241,6 +381,19 @@ LanguageServer <- R6::R6Class("LanguageServer",
                 stdin_read_char(n)
             }
         },
+        process_input = function(max_messages = 20L) {
+            processed <- 0L
+            # Apply queued edits and serve their requests before installing
+            # background results. Limit the batch so parsing and diagnostics
+            # also progress while a client is sending a stream of messages.
+            while (processed < max_messages && !isTRUE(self$exit_flag)) {
+                data <- self$fetch(blocking = FALSE)
+                if (is.null(data)) break
+                self$handle_raw(data)
+                processed <- processed + 1L
+            }
+            processed
+        },
         run = function() {
             on.exit(
                 {
@@ -258,14 +411,12 @@ LanguageServer <- R6::R6Class("LanguageServer",
                             break
                         }
 
+                        processed <- self$process_input()
+                        if (isTRUE(self$exit_flag)) next
                         self$process_events()
-
-                        data <- self$fetch(blocking = FALSE)
-                        if (is.null(data)) {
-                            Sys.sleep(0.1)
-                            next
+                        if (!processed) {
+                            Sys.sleep(0.01)
                         }
-                        self$handle_raw(data)
                     },
                     error = function(e) e
                 )
@@ -290,6 +441,7 @@ LanguageServer$set("public", "register_handlers", function() {
         `textDocument/signatureHelp` = text_document_signature_help,
         `textDocument/formatting` = text_document_formatting,
         `textDocument/rangeFormatting` = text_document_range_formatting,
+        `textDocument/rangesFormatting` = text_document_ranges_formatting,
         `textDocument/onTypeFormatting` = text_document_on_type_formatting,
         `textDocument/documentSymbol` = text_document_document_symbol,
         `textDocument/documentHighlight` = text_document_document_highlight,
@@ -297,6 +449,8 @@ LanguageServer$set("public", "register_handlers", function() {
         `documentLink/resolve` = document_link_resolve,
         `textDocument/documentColor` = text_document_document_color,
         `textDocument/codeAction` = text_document_code_action,
+        `textDocument/codeLens` = text_document_code_lens,
+        `codeLens/resolve` = code_lens_resolve,
         `textDocument/colorPresentation` = text_document_color_presentation,
         `textDocument/foldingRange` = text_document_folding_range,
         `textDocument/references` = text_document_references,
@@ -310,7 +464,11 @@ LanguageServer$set("public", "register_handlers", function() {
         `typeHierarchy/supertypes` = type_hierarchy_supertypes,
         `typeHierarchy/subtypes` = type_hierarchy_subtypes,
         `textDocument/linkedEditingRange` = text_document_linked_editing_range,
+        `textDocument/inlineValue` = text_document_inline_value,
+        `textDocument/inlayHint` = text_document_inlay_hint,
+        `inlayHint/resolve` = inlay_hint_resolve,
         `textDocument/semanticTokens/full` = text_document_semantic_tokens_full,
+        `textDocument/semanticTokens/full/delta` = text_document_semantic_tokens_delta,
         `textDocument/semanticTokens/range` = text_document_semantic_tokens_range,
         `workspace/symbol` = workspace_symbol
     )
@@ -325,6 +483,7 @@ LanguageServer$set("public", "register_handlers", function() {
         `workspace/didChangeConfiguration` = workspace_did_change_configuration,
         `workspace/didChangeWatchedFiles` = workspace_did_change_watched_files,
         `workspace/didChangeWorkspaceFolders` = workspace_did_change_workspace_folders,
+        `$/cancelRequest` = cancel_request,
         `$/setTrace` = protocol_set_trace
     )
 })
