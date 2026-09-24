@@ -1,8 +1,8 @@
 Type: Package
 Package: languageserver
 Title: Language Server Protocol
-Version: 0.3.19
-Date: 2026-09-11
+Version: 0.3.20
+Date: 2026-09-19
 Authors@R: 
     c(person(given = "Randy",
              family = "Lai",
@@ -34,9 +34,9 @@ Config/testthat/parallel: true
 Config/Needs/development: testthat, magrittr, mockery, purrr, withr,
         rmarkdown
 Config/roxygen2/version: 8.1.0
-Packaged: 2026-09-13 03:51:26 UTC; randylai
+Packaged: 2026-09-23 17:24:42 UTC; randylai
 Author: Randy Lai [aut, cre],
   Kun Ren [ctb]
 Maintainer: Randy Lai <randy.cs.lai@gmail.com>
 Repository: CRAN
-Date/Publication: 2026-09-13 04:10:02 UTC
+Date/Publication: 2026-09-24 08:50:13 UTC
