@@ -9,11 +9,12 @@ definition_xpath <- paste(
 #' Get the location of a specified function definition
 #'
 #' If the function is not found in a file but is found in a loaded package,
-#' writes the function definition to a temporary file and returns that
-#' as the location.
+#' returns a generated read-only document when supported by the client,
+#' otherwise writes the function definition to a temporary file.
 #' @noRd
-definition_reply <- function(id, uri, workspace, document, point, rootPath,
-    context_uri = uri) {
+definition_reply <- function(id, uri, workspace, document, point,
+    rootPath = get_root_path_for_uri(uri, workspace$root),
+    context_uri = uri, text_document_content = NULL) {
 
     if (!check_r_region(document, point)) {
         return(Response$new(id))
@@ -23,7 +24,43 @@ definition_reply <- function(id, uri, workspace, document, point, rootPath,
     resolved <- FALSE
     result <- NULL
 
-    xdoc <- workspace$get_parse_data(uri)$xml_doc
+    parse_data <- workspace$get_parse_data(uri)
+    syntax <- parse_data$syntax_data
+    if (token_result$accessor == "" && !is.null(syntax)) {
+        row <- point$row + 1L
+        col <- point$col + 1L
+        token <- navigation_token(parse_data, row, col)
+        if (token) {
+            token_name <- syntax$token[[token]]
+            token_text <- syntax$text[[token]]
+            if (token_name %in% c("SYMBOL", "SYMBOL_FUNCTION_CALL", "SYMBOL_FORMALS")) {
+                if (!navigation_after_dollar(syntax, token)) {
+                    found <- navigation_definitions(parse_data, row, col, token_text,
+                        token = token, last = TRUE)
+                    if (length(found)) {
+                        result <- list(uri = uri, range = navigation_range(document, syntax, found[[1L]]))
+                        resolved <- TRUE
+                    }
+                }
+            } else if (token_name == "STR_CONST") {
+                first <- syntax$line1[[token]]
+                if (first == syntax$line2[[token]]) {
+                    text <- substr(document$content[[first]], syntax$col1[[token]], syntax$col2[[token]])
+                    text <- tryCatch(as.character(str2lang(text)), error = function(e) NULL)
+                    if (is.character(text) && with_wd(rootPath,
+                            file.exists(text) && !dir.exists(text) && is_text_file(text))) {
+                        result <- list(uri = path_to_uri(fs::path_abs(text, rootPath)),
+                            range = range(position(0, 0), position(0, 0)))
+                    }
+                }
+                resolved <- TRUE
+            } else {
+                resolved <- TRUE
+            }
+        }
+    }
+
+    xdoc <- if (is.null(syntax)) parse_data_xml(parse_data)
     if (token_result$accessor == "" && !is.null(xdoc)) {
         row <- point$row + 1
         col <- point$col + 1
@@ -67,7 +104,7 @@ definition_reply <- function(id, uri, workspace, document, point, rootPath,
                     str_col1 <- as.integer(xml_attr(token, "col1"))
                     str_col2 <- as.integer(xml_attr(token, "col2"))
                     str_expr <- substr(document$content[str_line1], str_col1, str_col2)
-                    str_text <- tryCatch(as.character(parse(text = str_expr, keep.source = FALSE)),
+                    str_text <- tryCatch(as.character(str2lang(str_expr)),
                         error = function(e) NULL)
                     if (is.character(str_text)) {
                         if (with_wd(rootPath, file.exists(str_text) && !dir.exists(str_text) && is_text_file(str_text))) {
@@ -90,10 +127,27 @@ definition_reply <- function(id, uri, workspace, document, point, rootPath,
     }
 
     if (!resolved && check_scope(uri, document, point)) {
-        result <- call_with_optional_uri(
-            workspace$get_definition,
-            token_result$token, token_result$package,
+        arguments <- list(token_result$token, token_result$package,
             exported_only = token_result$accessor != ":::", uri = context_uri)
+        parameters <- names(formals(workspace$get_definition))
+        if (!is.null(text_document_content) &&
+                ("content_scheme" %in% parameters || "..." %in% parameters)) {
+            arguments$content_scheme <- text_document_content$scheme
+        }
+        result <- do.call(call_with_optional_uri,
+            c(list(workspace$get_definition), arguments))
+        text <- attr(result, "text_document_content")
+        if (!is.null(text)) {
+            if (!text_document_content$set(result$uri, text)) {
+                # Bodies exceeding the cache budget still have a usable
+                # definition, using the same fallback as legacy clients.
+                arguments$content_scheme <- NULL
+                result <- do.call(call_with_optional_uri,
+                    c(list(workspace$get_definition), arguments))
+            } else {
+                attr(result, "text_document_content") <- NULL
+            }
+        }
     }
 
     if (is.null(result)) {

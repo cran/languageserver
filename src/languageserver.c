@@ -1,5 +1,7 @@
 #include "search.h"
 #include "reader.h"
+#include "stdin.h"
+#include "message_buffer.h"
 #include "semantic.h"
 #include "encoding.h"
 #include "token.h"
@@ -10,6 +12,8 @@
 #include "signature.h"
 #include "call_hierarchy.h"
 #include "json.h"
+#include "member.h"
+#include "parse_xml.h"
 
 #ifdef _WIN32
 
@@ -38,26 +42,46 @@ static const R_CallMethodDef CallEntries[] = {
     {"response_json_c", (DL_FUNC) &response_json_c, 2},
     {"enclosed_by_quotes", (DL_FUNC) &enclosed_by_quotes, 2},
     {"detect_comments", (DL_FUNC) &detect_comments, 2},
+    {"uncomment_lines_c", (DL_FUNC) &uncomment_lines_c, 4},
+    {"missing_closing_delimiters_c", (DL_FUNC) &missing_closing_delimiters_c, 1},
     {"stdin_read_char", (DL_FUNC) &stdin_read_char, 1},
     {"stdin_read_line", (DL_FUNC) &stdin_read_line},
+    {"stdin_read_raw", (DL_FUNC) &stdin_read_raw, 1},
+    {"stdin_wait", (DL_FUNC) &stdin_wait, 1},
+    {"new_message_buffer_c", (DL_FUNC) &new_message_buffer_c, 0},
+    {"message_buffer_append_c", (DL_FUNC) &message_buffer_append_c, 2},
+    {"message_buffer_fetch_c", (DL_FUNC) &message_buffer_fetch_c, 1},
+    {"message_buffer_pending_c", (DL_FUNC) &message_buffer_pending_c, 1},
     {"encode_semantic_tokens_c", (DL_FUNC) &encode_semantic_tokens_c, 5},
     {"code_point_to_unit_c", (DL_FUNC) &code_point_to_unit_c, 2},
     {"code_point_from_unit_c", (DL_FUNC) &code_point_from_unit_c, 2},
     {"scan_token_c", (DL_FUNC) &scan_token_c, 3},
+    {"scan_backtick_completion_c", (DL_FUNC) &scan_backtick_completion_c, 2},
+    {"scan_closed_string_completion_c", (DL_FUNC) &scan_closed_string_completion_c, 2},
     {"match_with_c", (DL_FUNC) &match_with_c, 2},
     {"fuzzy_find_c", (DL_FUNC) &fuzzy_find_c, 2},
-    {"completion_parse_index_c", (DL_FUNC) &completion_parse_index_c, 7},
+    {"completion_parse_index_c", (DL_FUNC) &completion_parse_index_c, 8},
     {"completion_select_c", (DL_FUNC) &completion_select_c, 4},
+    {"member_binding_c", (DL_FUNC) &member_binding_c, 3},
+    {"member_syntax_names_c", (DL_FUNC) &member_syntax_names_c, 1},
+    {"member_function_key_c", (DL_FUNC) &member_function_key_c, 1},
     {"source_calls_c", (DL_FUNC) &source_calls_c, 1},
+    {"syntax_xml_c", (DL_FUNC) &syntax_xml_c, 1},
+    {"syntax_index_c", (DL_FUNC) &syntax_index_c, 2},
+    {"navigation_index_c", (DL_FUNC) &navigation_index_c, 1},
+    {"syntax_enclosing_c", (DL_FUNC) &syntax_enclosing_c, 2},
+    {"navigation_select_c", (DL_FUNC) &navigation_select_c, 6},
     {"navigation_find_token_c", (DL_FUNC) &navigation_find_token_c, 6},
     {"reference_resolve_local_c", (DL_FUNC) &reference_resolve_local_c, 8},
     {"signature_info_c", (DL_FUNC) &signature_info_c, 1},
-    {"active_parameter_c", (DL_FUNC) &active_parameter_c, 2},
+    {"active_parameter_c", (DL_FUNC) &active_parameter_c, 6},
+    {"new_signature_call_cache_c", (DL_FUNC) &new_signature_call_cache_c, 0},
+    {"signature_call_bracket_c", (DL_FUNC) &signature_call_bracket_c, 5},
     {"semantic_token_delta_c", (DL_FUNC) &semantic_token_delta_c, 2},
     {"semantic_token_range_c", (DL_FUNC) &semantic_token_range_c, 3},
     {"range_line_bounds_c", (DL_FUNC) &range_line_bounds_c, 3},
-    {"function_assignment_ids_c", (DL_FUNC) &function_assignment_ids_c, 1},
-    {"range_provider_index_c", (DL_FUNC) &range_provider_index_c, 1},
+    {"function_assignment_ids_c", (DL_FUNC) &function_assignment_ids_c, 2},
+    {"range_provider_index_c", (DL_FUNC) &range_provider_index_c, 2},
     {"call_hierarchy_containers_c", (DL_FUNC) &call_hierarchy_containers_c, 2},
 #if !defined(_WIN32)
     {"process_is_detached", (DL_FUNC) &process_is_detached},

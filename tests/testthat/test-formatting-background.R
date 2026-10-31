@@ -1,3 +1,37 @@
+skip_if_not_installed("styler", "1.5.1")
+
+test_that("direct formatting snapshots preserve package defaults and explicit overrides", {
+    snapshot <- list(uri = "untitled:direct-format", language = "r", version = 1L, content = "x=1")
+    withr::local_options(languageserver.formatting_style = NULL)
+    edits <- format_document(snapshot, list(tabSize = 2L))
+    expect_equal(edits[[1L]]$newText, "x <- 1\n")
+    edits <- format_document(snapshot, list(tabSize = 2L), formatting_options = list(
+        languageserver.formatting_style = function(options) {
+            style <- styler::tidyverse_style(indent_by = options$tabSize)
+            style$token$force_assignment_op <- NULL
+            style
+        }))
+    expect_equal(edits[[1L]]$newText, "x = 1\n")
+    expect_null(getOption("languageserver.formatting_style"))
+})
+
+test_that("first namespace loading through a library alias preserves formatting identity", {
+    stable <- callr::r(function() {
+        namespace <- asNamespace("languageserver")
+        alias <- tempfile("library-alias-")
+        dir.create(alias)
+        on.exit(unlink(alias, recursive = TRUE))
+        if (!suppressWarnings(file.symlink(find.package("styler"), file.path(alias, "styler")))) return(NA)
+        .libPaths(c(alias, .libPaths()))
+        document <- namespace$Document$new("untitled:library-alias", language = "r", version = 1L, content = "x=1")
+        first <- namespace$backend_request("formatting", document$uri, document)
+        second <- namespace$backend_request("formatting", document$uri, document)
+        identical(first$signature, second$signature)
+    }, system_profile = FALSE, user_profile = FALSE)
+    skip_if(is.na(stable), "Directory symlinks are unavailable")
+    expect_true(stable)
+})
+
 formatting_fixture <- function(content = "x=1", uri = "file:///formatting.R") {
     self <- new.env(parent = baseenv())
     document <- Document$new(uri, version = 1L, content = content)
@@ -29,6 +63,24 @@ formatting_fixture <- function(content = "x=1", uri = "file:///formatting.R") {
 
 formatting_test_task <- function(fixture, id) {
     fixture$manager$.__enclos_env__$private$pending_tasks$get(as.character(id))
+}
+
+formatting_wait_for_tasks <- function(fixture, timeout = 15) {
+    if (missing(timeout) && identical(Sys.getenv("R_COVR"), "true")) {
+        # Starting a worker and loading the instrumented namespace takes longer
+        # under coverage, especially alongside other parallel test processes.
+        timeout <- 60
+    }
+    deadline <- Sys.time() + timeout
+    while (fixture$manager$has_work() && Sys.time() < deadline) {
+        fixture$manager$run_tasks()
+        fixture$manager$check_tasks()
+        Sys.sleep(0.01)
+    }
+    if (fixture$manager$has_work()) {
+        stop("Background formatting did not complete within ", timeout, " seconds")
+    }
+    invisible(NULL)
 }
 
 test_that("explicit formatting handlers enqueue immutable snapshots", {
@@ -144,12 +196,7 @@ test_that("background formatting preserves custom styles and literate boundaries
         c("Prose", "```{r}", "x=1", "```", "```{python}", "x=1", "```"),
         "file:///formatting.qmd")
     text_document_formatting(fixture$self, 1L, fixture$params)
-    deadline <- Sys.time() + 15
-    while (fixture$manager$has_work() && Sys.time() < deadline) {
-        fixture$manager$run_tasks()
-        fixture$manager$check_tasks()
-        Sys.sleep(0.01)
-    }
+    formatting_wait_for_tasks(fixture)
     expect_length(fixture$self$deliveries, 1L)
     reply <- fixture$self$deliveries[[1L]]
     expect_null(reply$error)
@@ -161,12 +208,7 @@ test_that("background formatting preserves custom styles and literate boundaries
     # Reusing the same session must pick up a changed server-side option.
     options(languageserver.formatting_style = NULL)
     text_document_formatting(fixture$self, 2L, fixture$params)
-    deadline <- Sys.time() + 15
-    while (fixture$manager$has_work() && Sys.time() < deadline) {
-        fixture$manager$run_tasks()
-        fixture$manager$check_tasks()
-        Sys.sleep(0.01)
-    }
+    formatting_wait_for_tasks(fixture)
     expect_length(fixture$self$deliveries, 2L)
     expect_equal(fixture$self$deliveries[[2L]]$result[[1L]]$newText, "x <- 1")
 
@@ -174,12 +216,7 @@ test_that("background formatting preserves custom styles and literate boundaries
     fixture$params$ranges <- list(fixture$params$range, fixture$params$range)
     text_document_range_formatting(fixture$self, 3L, fixture$params)
     text_document_ranges_formatting(fixture$self, 4L, fixture$params)
-    deadline <- Sys.time() + 15
-    while (fixture$manager$has_work() && Sys.time() < deadline) {
-        fixture$manager$run_tasks()
-        fixture$manager$check_tasks()
-        Sys.sleep(0.01)
-    }
+    formatting_wait_for_tasks(fixture)
     expect_length(fixture$self$deliveries, 4L)
     for (id in 3:4) {
         reply <- fixture$self$deliveries[[id]]

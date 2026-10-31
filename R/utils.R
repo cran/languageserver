@@ -115,13 +115,10 @@ uri_escape_unicode <- function(uri) {
     if (length(uri) == 0) {
         return(character())
     }
-    if (.Platform$OS.type == "windows") {
-        uri <- utils::URLdecode(uri)
-        Encoding(uri) <- "UTF-8"
-        utils::URLencode(uri)
-    } else {
-        utils::URLencode(uri)
-    }
+    # URLencode otherwise skips the entire URI after finding one escape.
+    # Encode remaining Unicode and spaces while preserving existing octets.
+    encoded <- utils::URLencode(enc2utf8(uri), repeated = TRUE)
+    gsub("%25([[:xdigit:]]{2})", "%\\1", encoded)
 }
 
 #' Paths and uris
@@ -168,7 +165,14 @@ path_to_uri <- function(path) {
     } else {
         prefix <- "file://"
     }
-    paste0(prefix, utils::URLencode(path))
+    # Escape the path before adding the URI scheme. Slashes and a Windows
+    # drive colon delimit the path; all other reserved characters are literal.
+    encoded <- utils::URLencode(enc2utf8(path), reserved = TRUE, repeated = TRUE)
+    encoded <- gsub("%2F", "/", encoded, fixed = TRUE)
+    if (.Platform$OS.type == "windows") {
+        encoded <- sub("^([[:alpha:]])%3A", "\\1:", encoded)
+    }
+    paste0(prefix, encoded)
 }
 
 
@@ -266,18 +270,30 @@ is_ascii_vector <- function(x) {
 
 match_with <- function(x, token) {
     if (is_ascii_string(token) && is_ascii_vector(x)) {
-        return(.Call("match_with_c", PACKAGE = "languageserver", x, token))
+        matches <- .Call("match_with_c", PACKAGE = "languageserver", x, token)
+        matches[is.na(matches)] <- FALSE
+        return(matches)
     }
-    pattern <- gsub(".", "\\.", token, fixed = TRUE)
-    grepl(pattern, x, ignore.case = TRUE)
+    if (is.na(token)) return(rep(NA, length(x)))
+    if (!nzchar(token)) return(!is.na(x))
+    matches <- stringi::stri_detect_fixed(x, token, case_insensitive = TRUE)
+    matches[is.na(matches)] <- FALSE
+    matches
 }
 
 fuzzy_find <- function(x, pattern) {
+    if (is.na(pattern)) return(rep(NA, length(x)))
+    if (!nzchar(pattern)) return(!is.na(x))
     if (is_ascii_string(pattern) && is_ascii_vector(x)) {
-        return(.Call("fuzzy_find_c", PACKAGE = "languageserver", x, pattern))
+        matches <- .Call("fuzzy_find_c", PACKAGE = "languageserver", x, pattern)
+    } else {
+        characters <- strsplit(pattern, "", fixed = TRUE)[[1L]]
+        subsequence_regex <- paste0("\\Q", characters, "\\E", collapse = ".*")
+        matches <- stringi::stri_detect_regex(x, subsequence_regex,
+            case_insensitive = TRUE, dotall = TRUE)
     }
-    subsequence_regex <- gsub("(.)", "\\1.*", pattern)
-    grepl(subsequence_regex, x, ignore.case = TRUE)
+    matches[is.na(matches)] <- FALSE
+    matches
 }
 
 
@@ -449,14 +465,14 @@ throttle <- function(fun, t = 1) {
 #'
 #' @noRd
 sanitize_names <- function(objects) {
-    objects[stringi::stri_detect_regex(objects, "^([^\\W_]|\\.(?!_))(\\w|\\.)*$")]
+    objects[stringi::stri_detect_regex(objects, r"(^([^\W_]|\.(?!_))(\w|\.)*$)")]
 }
 
 na_to_empty_string <- function(x) if (is.na(x)) "" else x
 empty_string_to_null <- function(x) if (nzchar(x)) x else NULL
 
 look_forward <- function(text) {
-    matches <- stringi::stri_match_first_regex(text, "^(?:[^\\W]|\\.)*\\b")[1]
+    matches <- stringi::stri_match_first_regex(text, r"(^(?:[^\W]|\.)*\b)")[1]
     list(
         token = na_to_empty_string(matches[1])
     )
@@ -464,7 +480,7 @@ look_forward <- function(text) {
 
 look_backward <- function(text) {
     matches <- stringi::stri_match_first_regex(
-        text, "(?<!\\$)(?:\\b|(?=\\.))(?:([a-zA-Z][a-zA-Z0-9.]+)(:::?))?((?:[^\\W_]|\\.)(?:[^\\W]|\\.)*)?$")
+        text, r"((?<!\$)(?:\b|(?=\.))(?:([a-zA-Z][a-zA-Z0-9.]+)(:::?))?((?:[^\W_]|\.)(?:[^\W]|\.)*)?$)")
     list(
         full_token = na_to_empty_string(matches[1]),
         package  = na_to_empty_string(matches[2]),
@@ -572,8 +588,10 @@ find_doc_item <- function(doc, tag) {
 }
 
 get_help_rd <- function(hfile) {
-    getNamespace("utils")$.getHelpFile(hfile)
+    getNamespace("utils")$.getHelpFile(package_metadata_help_file(hfile))
 }
+
+package_help_owner <- new.env(parent = emptyenv())
 
 get_help <- function(hfile, format = c("html", "text")) {
     format <- match.arg(format)
@@ -584,8 +602,18 @@ get_help <- function(hfile, format = c("html", "text")) {
         return(NULL)
     }
 
-    rd <- get_help_rd(hfile)
     pkgname <- basename(dirname(dirname(paths[[1]])))
+    identity <- tryCatch(package_metadata_help_identity(hfile), error = function(e) NULL)
+    context <- package_metadata_help_context()
+    cache <- analysis_cache(package_help_owner, "rendered-help", context)
+    key <- digest::digest(list(paths, identity, format), algo = "xxhash64")
+    found <- if (!is.null(identity)) analysis_cache_get(cache, key) else list(hit = FALSE)
+    if (found$hit) return(found$value)
+    cache_path <- if (!is.null(identity)) package_metadata_cache_path(paste0("help-", format), identity,
+        list(paths, context = context))
+    cached <- package_metadata_cache_read(cache_path, identity, is.character)
+    if (!is.null(cached)) return(analysis_cache_set(cache, key, cached))
+    rd <- get_help_rd(hfile)
 
     if (format == "html") {
         result <- paste0(utils::capture.output(
@@ -600,7 +628,10 @@ get_help <- function(hfile, format = c("html", "text")) {
         stop("Invalid format")
     }
 
-    enc2utf8(result)
+    result <- enc2utf8(result)
+    package_metadata_cache_write(cache_path, identity, result)
+    if (!is.null(identity)) analysis_cache_set(cache, key, result)
+    result
 }
 
 convert_doc_to_markdown <- function(doc) {
@@ -638,7 +669,47 @@ glue <- function(.x, ...) {
     .x
 }
 
-xdoc_top_level_index <- function(x) {
+#' Materialize legacy XML only when a provider needs it
+#' @noRd
+parse_data_xml <- function(parse_data) {
+    if (is.null(parse_data)) return(NULL)
+    if (!is.null(parse_data$xml_doc)) return(parse_data$xml_doc)
+    xdoc <- tryCatch({
+        xml <- parse_data$xml_data
+        if (is.null(xml) && isTRUE(parse_data$xml_deferred)) xml <- syntax_xml(parse_data$syntax_data)
+        if (is.null(xml)) NULL else xml2::read_xml(xml)
+    }, error = function(e) NULL)
+    if (!is.null(xdoc)) {
+        attr(xdoc, "top_level_index") <- xdoc_top_level_index(
+            xdoc, parse_data$syntax_data, parse_data$navigation_data)
+    }
+    if (is.environment(parse_data)) parse_data$xml_doc <- xdoc
+    xdoc
+}
+
+xdoc_top_level_index <- function(x, syntax = NULL, navigation = NULL) {
+    if (!is.null(syntax) && !is.null(navigation)) {
+        # XML is needed by legacy providers, but syntax facts are already
+        # built in the worker. Map preorder rows once instead of rediscovering
+        # token attributes and assignment predicates on the main thread.
+        all_nodes <- xml_find_all(x, "descendant::*")
+        if (length(all_nodes) == length(syntax$id)) {
+            rank <- syntax$order_rank
+            roots <- syntax$roots[syntax$token[syntax$roots] == "expr"]
+            definitions <- all_nodes[rank[navigation$node]]
+            names <- syntax$text[navigation$name]
+            return(list(
+                nodes = all_nodes[rank[roots]],
+                line1 = syntax$line1[roots], col1 = syntax$col1[roots],
+                line2 = syntax$line2[roots], col2 = syntax$col2[roots],
+                definitions = definitions,
+                definitions_by_name = list2env(split(seq_along(names), names),
+                    hash = TRUE, parent = emptyenv()),
+                tokens = c(list(nodes = all_nodes[rank[syntax$terminals]]), syntax$tokens),
+                syntax = syntax, navigation = navigation, all_nodes = all_nodes
+            ))
+        }
+    }
     nodes <- xml_children(x)
     nodes <- nodes[xml_name(nodes) == "expr"]
     # An explicit descendant axis avoids libxml2 repeatedly merging terminal
@@ -687,6 +758,15 @@ xdoc_top_level_index <- function(x) {
 
 xdoc_find_enclosing_scopes <- function(x, line, col, top = FALSE) {
     index <- attr(x, "top_level_index", exact = TRUE)
+    if (!is.null(index$syntax)) {
+        rows <- .Call("syntax_enclosing_c", index$syntax, as.integer(c(line, col)), PACKAGE = "languageserver")
+        scopes <- index$all_nodes[index$syntax$order_rank[rows]]
+        if (top) {
+            root <- xml_find_all(x, "/exprlist")
+            return(structure(c(unclass(root), unclass(scopes)), class = "xml_nodeset"))
+        }
+        return(scopes)
+    }
     condition <- paste(
         "(@line1 < {line} or (@line1 = {line} and @col1 <= {col})) and",
         "(@line2 > {line} or (@line2 = {line} and @col2 >= {col}-1))"
@@ -719,6 +799,21 @@ xdoc_find_enclosing_scopes <- function(x, line, col, top = FALSE) {
 
 xdoc_find_definitions <- function(x, line, col, name, xpath) {
     index <- attr(x, "top_level_index", exact = TRUE)
+    if (!is.null(index$syntax)) {
+        signature <- grepl("/expr[FUNCTION|OP-LAMBDA]", xpath, fixed = TRUE)
+        mode <- if (signature) "signature" else if (grepl("/parent::expr", xpath, fixed = TRUE)) "hover" else "definition"
+        token <- if (signature) 0L else navigation_token(list(syntax_data = index$syntax), line, col)
+        template <- get(paste0(mode, "_xpath"))
+        syntax <- index$syntax
+        token_start <- if (token) syntax$line1[[token]] * syntax$maxcol + syntax$col1[[token]] else NA_integer_
+        token_end <- if (token) syntax$line2[[token]] * syntax$maxcol + syntax$col2[[token]] else NA_integer_
+        expected <- glue(template, row = line, start = token_start, end = token_end, token_quote = xml_single_quote(name))
+        if (identical(xpath, expected)) {
+            rows <- navigation_definitions(list(syntax_data = syntax, navigation_data = index$navigation),
+                line, col, name, mode, token)
+            return(index$all_nodes[syntax$order_rank[rows]])
+        }
+    }
     if (is.null(index$definitions_by_name)) {
         scopes <- xdoc_find_enclosing_scopes(x, line, col, top = TRUE)
         return(xml_find_all(scopes, xpath))

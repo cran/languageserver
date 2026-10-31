@@ -1,5 +1,32 @@
 references_xpath <- "//*[(self::SYMBOL or self::SYMBOL_FUNCTION_CALL or self::SYMBOL_FORMALS) and text() = '{token_quote}']"
 
+#' Classify bare magrittr stages as calls without changing source positions
+#' @noRd
+reference_call_tokens <- function(data, syntax = NULL) {
+    tokens <- data$token
+    pipes <- which(tokens == "SPECIAL" & data$text %in% c("%>%", "%<>%", "%T>%"))
+    if (!length(pipes)) return(tokens)
+    if (is.null(syntax)) syntax <- syntax_parse_data(data)
+    for (pipe in pipes) {
+        siblings <- syntax_children(syntax, syntax$parent_row[[pipe]])
+        siblings <- siblings[tokens[siblings] != "COMMENT"]
+        at <- match(pipe, siblings)
+        if (is.na(at) || at == length(siblings)) next
+        rhs <- siblings[[at + 1L]]
+        if (tokens[[rhs]] != "expr") next
+        children <- syntax_children(syntax, rhs)
+        children <- children[tokens[children] != "COMMENT"]
+        bare <- length(children) == 1L && tokens[children] == "SYMBOL"
+        qualified <- length(children) == 3L && tokens[[children[[1L]]]] == "SYMBOL_PACKAGE" &&
+            tokens[[children[[2L]]]] %in% c("NS_GET", "NS_GET_INT") && tokens[[children[[3L]]]] == "SYMBOL"
+        if (bare || qualified) {
+            name <- utils::tail(children, 1L)
+            if (data$text[[name]] != ".") tokens[[name]] <- "SYMBOL_FUNCTION_CALL"
+        }
+    }
+    tokens
+}
+
 #' Build the symbol occurrence index used by references and call providers
 #'
 #' The completion parser already records the lexical range of local
@@ -8,7 +35,7 @@ references_xpath <- "//*[(self::SYMBOL or self::SYMBOL_FUNCTION_CALL or self::SY
 #' resolution for every occurrence in an interactive request.
 #' @noRd
 reference_parse_data <- function(data, content, completion_data, uri,
-    global_definitions) {
+    global_definitions, syntax = NULL) {
     empty <- list(
         name = character(),
         token = character(),
@@ -26,18 +53,16 @@ reference_parse_data <- function(data, content, completion_data, uri,
     )
     if (is.null(data) || !nrow(data)) return(empty)
 
+    call_tokens <- reference_call_tokens(data, syntax)
+
     rows <- which(data$terminal & data$token %in% c(
         "SYMBOL", "SYMBOL_FUNCTION_CALL", "SYMBOL_FORMALS"))
     if (!length(rows)) return(empty)
 
-    # Member names following `$` are properties, not lexical symbols.
-    row_lines <- content[data$line1[rows]]
-    member <- data$col1[rows] > 1L &
-        stringi::stri_sub(
-            row_lines,
-            from = pmax(data$col1[rows] - 1L, 1L),
-            to = pmax(data$col1[rows] - 1L, 1L)
-        ) == "$"
+    # The property is a direct sibling of `$`; the receiver is inside its
+    # own expression. Syntax preserves this relationship across whitespace
+    # and line breaks.
+    member <- data$parent[rows] %in% data$parent[data$token == "'$'"]
     rows <- rows[!member]
     if (!length(rows)) return(empty)
 
@@ -124,43 +149,22 @@ reference_parse_data <- function(data, content, completion_data, uri,
     end_cols <- as.integer(data$col2[rows])
     non_ascii_lines <- nchar(content, type = "bytes") !=
         nchar(content, type = "chars")
-    convert <- which(non_ascii_lines[data$line1[rows]])
-    for (i in convert) {
-        row_index <- rows[[i]]
-        converted <- code_point_to_unit(
-            content[[data$line1[[row_index]]]],
-            c(data$col1[[row_index]] - 1L, data$col2[[row_index]])
-        )
-        cols[[i]] <- converted[[1L]]
-        end_cols[[i]] <- converted[[2L]]
-    }
+    units <- syntax_unit_columns(content, data$line1[rows], cols, end_cols, non_ascii_lines)
+    cols <- units$start
+    end_cols <- units$end
 
-    qualified_call <- data$token[rows] == "SYMBOL_FUNCTION_CALL" &
-        data$col1[rows] > 2L &
-        stringi::stri_sub(
-            content[data$line1[rows]],
-            from = pmax(data$col1[rows] - 2L, 1L),
-            to = pmax(data$col1[rows] - 1L, 1L)
-        ) == "::"
+    package_rows <- which(data$token == "SYMBOL_PACKAGE")
+    package_match <- match(data$parent[rows], data$parent[package_rows])
+    qualified <- which(!is.na(package_match))
+    qualified_call <- !is.na(package_match) & call_tokens[rows] == "SYMBOL_FUNCTION_CALL"
     call_package <- rep("", length(rows))
-    for (i in which(qualified_call)) {
-        row_index <- rows[[i]]
-        token <- scan_token(
-            content[[data$line1[[row_index]]]],
-            data$col1[[row_index]] - 1L,
-            forward = TRUE
-        )
-        package <- token$package
-        if (!is.null(package) && nzchar(package)) {
-            call_package[[i]] <- package
-            definition_keys[[i]] <- paste(
-                "package", package, names[[i]], sep = ":")
-        }
-    }
+    call_package[qualified] <- data$text[package_rows[package_match[qualified]]]
+    definition_keys[qualified] <- paste(
+        "package", call_package[qualified], names[qualified], sep = ":")
 
     list(
         name = names,
-        token = data$token[rows],
+        token = call_tokens[rows],
         line = as.integer(data$line1[rows] - 1L),
         col = cols,
         end_line = as.integer(data$line2[rows] - 1L),
@@ -221,13 +225,17 @@ indexed_reference_locations <- function(index, uri, selected) {
 }
 
 #' @noRd
-references_reply <- function(id, uri, workspace, document, point) {
+references_reply <- function(id, uri, workspace, document, point,
+    include_declaration = TRUE) {
 
     if (!check_r_region(document, point)) {
         return(Response$new(id, result = list()))
     }
 
     token <- document$detect_token(point)
+    if (!nzchar(token$token) || !check_scope(uri, document, point)) {
+        return(Response$new(id, result = list()))
+    }
     defn <- definition_reply(NULL, uri, workspace, document, point)
     token_quote <- xml_single_quote(token$token)
 
@@ -254,6 +262,9 @@ references_reply <- function(id, uri, workspace, document, point) {
                 indexed <- workspace$get_parse_data(doc_uri)$reference_index
                 if (is.null(indexed)) next
                 selected <- reference_indices(indexed, token$token, definition_key)
+                if (!isTRUE(include_declaration)) {
+                    selected <- selected[!indexed$is_definition[selected]]
+                }
                 if (length(selected)) {
                     result <- c(
                         result,
@@ -268,7 +279,7 @@ references_reply <- function(id, uri, workspace, document, point) {
             workspace, defn$result$uri, uri)
         doc_results <- lapply(doc_uris, function(doc_uri) {
             doc <- workspace$documents$get(doc_uri)
-            xdoc <- workspace$get_parse_data(doc_uri)$xml_doc
+            xdoc <- parse_data_xml(workspace$get_parse_data(doc_uri))
             if (is.null(xdoc)) {
                 return(list())
             }
@@ -286,6 +297,14 @@ references_reply <- function(id, uri, workspace, document, point) {
             matches <- vector("list", length(symbols))
             idx <- 0L
             for (i in seq_along(symbols)) {
+                if (!isTRUE(include_declaration)) {
+                    declaration <- xml_find_all(symbols[[i]], paste(
+                        "self::SYMBOL_FORMALS",
+                        "self::SYMBOL[parent::forcond]",
+                        "self::SYMBOL[parent::expr[count(*)=1][following-sibling::LEFT_ASSIGN or following-sibling::EQ_ASSIGN or preceding-sibling::RIGHT_ASSIGN]]",
+                        sep = " | "))
+                    if (length(declaration)) next
+                }
                 symbol_point <- list(row = line1[[i]] - 1, col = col1[[i]])
                 symbol_defn <- definition_reply(
                     NULL, doc_uri, workspace, doc, symbol_point,

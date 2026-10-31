@@ -89,3 +89,49 @@ test_that("obsolete workers are retired after the bounded cancellation grace", {
     expect_length(private$sessions, 0L)
     expect_equal(private$superseded_tasks$size(), 0L)
 })
+
+test_that("Member requests promote the existing debounced parse without replacement", {
+    manager <- TaskManager$new("promotion", max_running_tasks = 1L)
+    withr::defer(manager$stop())
+    task <- create_task(function() TRUE, list(), delay = 60)
+    manager$add_task("doc", task)
+    manager$promote("doc")
+    manager$promote("doc")
+    manager$promote("missing")
+    private <- manager$.__enclos_env__$private
+    expect_identical(private$pending_tasks$get("doc"), task)
+    expect_equal(task$delay, 0)
+    expect_equal(private$pending_tasks$size(), 1L)
+})
+
+test_that("task delay readiness uses monotonic deadlines and promotion", {
+    manager <- TaskManager$new("deadline", max_running_tasks = 1L)
+    withr::defer(manager$stop())
+    task <- create_task(function() TRUE, list(), delay = 60)
+    # Wall-clock jumps do not affect dispatch eligibility.
+    task$time <- Sys.time() - 3600
+    manager$add_task("doc", task)
+    expect_equal(manager$wait_timeout(1), 1)
+    manager$run_tasks()
+    expect_true(manager$.__enclos_env__$private$pending_tasks$has("doc"))
+    manager$promote("doc")
+    expect_equal(manager$wait_timeout(1), 0)
+})
+
+test_that("ready queued tasks do not busy-poll when worker slots are full", {
+    manager <- TaskManager$new("full", max_running_tasks = 1L, cpu_load = 1)
+    withr::defer(manager$stop())
+    manager$.__enclos_env__$private$running_tasks$set("running", create_task(function() TRUE, list()))
+    manager$add_task("pending", create_task(function() TRUE, list()))
+    expect_equal(manager$wait_timeout(0.01), 0.01)
+})
+
+test_that("queued tasks await starting persistent workers without busy-polling", {
+    manager <- TaskManager$new("starting readiness", use_session = TRUE,
+        min_idle_sessions = 0L, max_running_tasks = 1L)
+    withr::defer(manager$stop())
+    manager$.__enclos_env__$private$sessions <- list(list(
+        get_state = function() "starting", close = function(...) NULL))
+    manager$add_task("pending", create_task(function() TRUE, list()))
+    expect_equal(manager$wait_timeout(0.01), 0.01)
+})

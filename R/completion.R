@@ -34,6 +34,16 @@ InsertTextFormat <- list(
     Snippet = 2
 )
 
+quote_completion_name <- function(name) {
+    if (identical(make.names(name), name)) name else encodeString(name, quote = "`")
+}
+
+escape_completion_snippet <- function(text) {
+    text <- gsub("\\", "\\\\", text, fixed = TRUE)
+    text <- gsub("$", "\\$", text, fixed = TRUE)
+    gsub("}", "\\}", text, fixed = TRUE)
+}
+
 sort_prefixes <- list(
     arg = "0-",
     scope = "1-",
@@ -53,7 +63,7 @@ constants <- c("TRUE", "FALSE", "NULL",
 #' repeatedly walk the complete XML parse tree. All values stored here are
 #' ordinary R vectors and can therefore be returned by the parse subprocess.
 #' @noRd
-completion_parse_data <- function(data) {
+completion_parse_data <- function(data, syntax = NULL) {
     empty_scope <- function() {
         list(
             name = character(),
@@ -88,7 +98,8 @@ completion_parse_data <- function(data) {
         data$line1,
         data$col1,
         data$line2,
-        data$col2
+        data$col2,
+        syntax
     )
 
     make_records <- function(name_rows, range_rows) {
@@ -316,7 +327,21 @@ arg_completion <- function(uri, workspace, point, token, funct, package = NULL, 
     token_data <- NULL
 
     if (is.null(package)) {
-        xdoc <- workspace$get_parse_data(uri)$xml_doc
+        parse_data <- workspace$get_parse_data(uri)
+        syntax <- parse_data$syntax_data
+        if (!is.null(syntax)) {
+            found <- navigation_definitions(parse_data, point$row + 1L, point$col + 1L,
+                funct, "signature", last = TRUE)
+            if (length(found)) {
+                declaration <- found[[1L]]
+                children <- syntax_children(syntax, declaration)
+                args <- syntax$text[children[syntax$token[children] == "SYMBOL_FORMALS"]]
+                token_args <- args[match_with(args, token)]
+                token_data <- list(type = "parameter", funct = funct, uri = uri,
+                    line = syntax$line1[[declaration]])
+            }
+        }
+        xdoc <- if (is.null(syntax)) parse_data_xml(parse_data)
         if (!is.null(xdoc)) {
             row <- point$row + 1
             col <- point$col + 1
@@ -364,11 +389,13 @@ arg_completion <- function(uri, workspace, point, token, funct, package = NULL, 
     }
 
     completions <- .mapply(function(arg, sort_text) {
+        # XML formals already include source backticks; namespace formals do not.
+        inserted <- if (is.null(token_data$uri)) quote_completion_name(arg) else arg
         list(label = arg,
             kind = CompletionItemKind$Variable,
             detail = "parameter",
             sortText = sort_text,
-            insertText = paste0(arg, " = "),
+            insertText = paste0(inserted, " = "),
             insertTextFormat = InsertTextFormat$PlainText,
             data = token_data
         )
@@ -395,7 +422,7 @@ ns_function_completion <- function(ns, token, exported_only, snippet_support) {
                 kind = CompletionItemKind$Function,
                 detail = tag,
                 sortText = paste0(sort_prefix, object),
-                insertText = paste0(object, "($0)"),
+                insertText = paste0(escape_completion_snippet(quote_completion_name(object)), "($0)"),
                 insertTextFormat = InsertTextFormat$Snippet,
                 data = list(
                     type = "function",
@@ -404,7 +431,8 @@ ns_function_completion <- function(ns, token, exported_only, snippet_support) {
         })
     } else {
         completions <- lapply(functs, function(object) {
-            list(label = object,
+            inserted <- quote_completion_name(object)
+            item <- list(label = object,
                 kind = CompletionItemKind$Function,
                 detail = tag,
                 sortText = paste0(sort_prefix, object),
@@ -412,6 +440,8 @@ ns_function_completion <- function(ns, token, exported_only, snippet_support) {
                     type = "function",
                     package = nsname
             ))
+            if (!identical(inserted, object)) item$insertText <- inserted
+            item
         })
     }
     completions
@@ -436,13 +466,14 @@ imported_object_completion <- function(workspace, token, snippet_support) {
                     kind = CompletionItemKind$Function,
                     detail = paste0("{", nsname, "}"),
                     sortText = paste0(sort_prefixes$imported, object),
-                    insertText = paste0(object, "($0)"),
+                    insertText = paste0(escape_completion_snippet(quote_completion_name(object)), "($0)"),
                     insertTextFormat = InsertTextFormat$Snippet,
                     data = list(
                         type = "function",
                         package = nsname
                 ))
             } else {
+                inserted <- quote_completion_name(object)
                 item <- list(label = object,
                     kind = CompletionItemKind$Function,
                     detail = paste0("{", nsname, "}"),
@@ -451,6 +482,7 @@ imported_object_completion <- function(workspace, token, snippet_support) {
                         type = "function",
                         package = nsname
                 ))
+                if (!identical(inserted, object)) item$insertText <- inserted
             }
             idx <- idx + 1L
             completions[[idx]] <- item
@@ -651,6 +683,7 @@ workspace_completion <- function(workspace, token,
 
     completions <- unname(Map(function(label, kind, detail, sort_text,
         type, package, is_function) {
+        inserted <- quote_completion_name(label)
         data <- list(type = type, package = package)
         if (!is.null(uri)) data$context_uri <- uri
         if (isTRUE(snippet_support) && is_function) {
@@ -659,18 +692,20 @@ workspace_completion <- function(workspace, token,
                 kind = kind,
                 detail = detail,
                 sortText = sort_text,
-                insertText = paste0(label, "($0)"),
+                insertText = paste0(escape_completion_snippet(inserted), "($0)"),
                 insertTextFormat = InsertTextFormat$Snippet,
                 data = data
             )
         } else {
-            list(
+            item <- list(
                 label = label,
                 kind = kind,
                 detail = detail,
                 sortText = sort_text,
                 data = data
             )
+            if (!identical(inserted, label)) item$insertText <- inserted
+            item
         }
     }, labels, kinds, details, sort_text, types, packages, functions))
 
@@ -694,6 +729,98 @@ scope_completion_functs_xpath <- paste(
     "(* | descendant-or-self::expr | descendant-or-self::expr_or_assign_or_help)/RIGHT_ASSIGN[preceding-sibling::expr/*[self::FUNCTION or self::OP-LAMBDA]]/following-sibling::expr[count(*)=1]/SYMBOL",
     "(* | descendant-or-self::expr | descendant-or-self::expr_or_assign_or_help)/EQ_ASSIGN[following-sibling::expr/*[self::FUNCTION or self::OP-LAMBDA]]/preceding-sibling::expr[count(*)=1]/SYMBOL",
     sep = "|")
+
+#' Complete bindings supplied by the enclosing execution context
+#' @noRd
+context_scope_completion <- function(uri, workspace, token, point,
+    snippet_support, limit, exclude) {
+    if (!isTRUE(lsp_settings$get("member_completion"))) return(list())
+    document <- if (!is.null(workspace$documents)) workspace$documents$get(uri, NULL)
+    if (is.null(document) || !check_scope(uri, document, point)) return(list())
+    if (!member_scope_required(workspace, document, point)) return(list())
+    if (!is.null(member_cursor(document, point))) return(list())
+    semantic <- document$parse_data$semantic_data
+    col <- document$to_lsp_position(point$row, point$col)$character
+    excluded <- semantic$lines == point$row & semantic$cols <= col &
+        ((semantic$types == SemanticTokenTypes$comment & semantic$cols + semantic$lengths >= col) |
+                (semantic$types == SemanticTokenTypes$string & semantic$cols + semantic$lengths > col))
+    if (any(excluded)) return(list())
+    token_data <- completion_token(document, point)
+    if (!is.null(token_data$package) || token_data$accessor %in% c("$", "@")) return(list())
+    start <- token_data$range$start$col
+    rest <- substring(document$line0(point$row), point$col + 1L)
+    suffix <- regexpr("^[[:alnum:]_.]*", rest, perl = TRUE)
+    end <- if (isTRUE(token_data$quoted)) {
+        token_data$range$end$col
+    } else {
+        point$col + attr(suffix, "match.length")[[1L]]
+    }
+    cursor <- list(
+        operator = start + 1L, operator_row = point$row,
+        start = start, end = end,
+        accessor = NULL, before = substr(document$line0(point$row), 1L, start)
+    )
+    resolved <- tryCatch(member_resolve_cursor(uri, workspace, document, point, cursor),
+        error = function(e) {
+            logger$info("context scope completion:", e)
+            NULL
+        })
+    if (is.null(resolved$value)) return(list())
+    fields <- resolved$value$fields
+    labels <- names(fields)
+    # Indexed definitions include source backticks; inferred bindings do not.
+    exclude <- vapply(exclude, function(name) {
+        if (!startsWith(name, "`")) return(name)
+        tryCatch(as.character(str2lang(name)), error = function(e) name)
+    }, character(1L))
+    # Source-indexed candidates still need inferred class information. Resolve
+    # a bounded set in the same lexical environment, so aliases and shadowing
+    # agree with hover rather than falling back to a global binding.
+    candidates <- exclude[match_with(exclude, token)]
+    selected <- completion_select_indices(candidates, candidates, token, limit)
+    class_info <- list()
+    for (label in candidates[selected]) {
+        if (isTRUE(resolved$budget$exhausted)) break
+        value <- if (label %in% names(fields)) {
+            member_completion_value(fields[[label]], resolved$index, resolved$budget)
+        } else {
+            member_infer(as.name(label), resolved$index, resolved$bindings, budget = resolved$budget)
+        }
+        description <- member_r6_description(value)
+        if (!is.null(description)) class_info[[label]] <- description
+    }
+    # R6 execution-context bindings hide enclosing declarations. Retain them
+    # here even if the source index found an outer symbol with the same name.
+    context_names <- resolved$value$context_bindings
+    labels <- setdiff(labels[match_with(labels, token)], setdiff(exclude, context_names))
+    selected <- completion_select_indices(labels, labels, token, limit)
+    items <- lapply(labels[selected], function(label) {
+        value <- member_completion_value(fields[[label]], resolved$index, resolved$budget)
+        is_function <- !is.null(value$function_expr) || !is.null(value$function_key) ||
+            "function" %in% value$type
+        inserted <- quote_completion_name(label)
+        description <- member_r6_description(value)
+        item <- list(
+            label = label,
+            kind = if (is_function) CompletionItemKind$Function else CompletionItemKind$Field,
+            detail = paste(c("[scope]", if (!is.null(description)) gsub("`", "", description, fixed = TRUE)), collapse = " "),
+            documentation = if (!is.null(description)) list(kind = "markdown", value = description),
+            sortText = paste0(sort_prefixes$scope, label),
+            data = list(type = "scope", context_uri = uri)
+        )
+        if (is_function && isTRUE(snippet_support)) {
+            item$insertText <- paste0(escape_completion_snippet(inserted), "($0)")
+            item$insertTextFormat <- InsertTextFormat$Snippet
+        } else if (!identical(inserted, label)) {
+            item$insertText <- inserted
+        }
+        item
+    })
+    attr(items, "class_info") <- class_info
+    attr(items, "member_context") <- resolved
+    if (length(labels) > limit || resolved$budget$exhausted) attr(items, "truncated") <- TRUE
+    items
+}
 
 scope_completion <- function(uri, workspace, token, point,
     snippet_support = NULL, limit = Inf) {
@@ -725,20 +852,34 @@ scope_completion <- function(uri, workspace, token, point,
         scope_funct_names <- completion_data$functions$name[function_selector]
         scope_funct_lines <- completion_data$functions$line[function_selector]
     } else {
-        xdoc <- parse_data$xml_doc
+        xdoc <- parse_data_xml(parse_data)
         if (is.null(xdoc)) {
-            return(list())
+            return(context_scope_completion(
+                uri, workspace, token, point, snippet_support, limit, character()))
         }
-
         enclosing_scopes <- xdoc_find_enclosing_scopes(xdoc, row, col)
 
+        in_lexical_scope <- function(nodes) {
+            vapply(nodes, function(node) {
+                scope <- xml_find_first(node, "ancestor::expr[FUNCTION or OP-LAMBDA][1]")
+                if (inherits(scope, "xml_missing")) return(TRUE)
+                contains_point(list(
+                    line1 = as.integer(xml_attr(scope, "line1")),
+                    col1 = as.integer(xml_attr(scope, "col1")),
+                    line2 = as.integer(xml_attr(scope, "line2")),
+                    col2 = as.integer(xml_attr(scope, "col2"))
+                ))
+            }, logical(1L))
+        }
         scope_symbol_nodes <- xml_find_all(enclosing_scopes,
             scope_completion_symbols_xpath)
+        scope_symbol_nodes <- scope_symbol_nodes[in_lexical_scope(scope_symbol_nodes)]
         scope_symbol_names <- xml_text(scope_symbol_nodes)
         scope_symbol_lines <- as.integer(xml_attr(scope_symbol_nodes, "line1"))
 
         scope_funct_nodes <- xml_find_all(enclosing_scopes,
             scope_completion_functs_xpath)
+        scope_funct_nodes <- scope_funct_nodes[in_lexical_scope(scope_funct_nodes)]
         scope_funct_names <- xml_text(scope_funct_nodes)
         scope_funct_lines <- as.integer(xml_attr(scope_funct_nodes, "line1"))
     }
@@ -760,19 +901,86 @@ scope_completion <- function(uri, workspace, token, point,
     scope_funct_lines <- scope_funct_lines[scope_funct_selector]
 
     candidate_names <- c(scope_symbol_names, scope_funct_names)
-    truncated <- length(candidate_names) > limit
-    if (truncated) {
-        keep <- completion_select_indices(
-            candidate_names, candidate_names, token, limit)
-        symbol_keep <- keep[keep <= length(scope_symbol_names)]
-        function_keep <- keep[keep > length(scope_symbol_names)] -
-            length(scope_symbol_names)
-        scope_symbol_names <- scope_symbol_names[symbol_keep]
-        scope_symbol_lines <- scope_symbol_lines[symbol_keep]
-        scope_funct_names <- scope_funct_names[function_keep]
-        scope_funct_lines <- scope_funct_lines[function_keep]
+    context_completions <- context_scope_completion(
+        uri, workspace, token, point, snippet_support, limit, candidate_names)
+    context <- attr(context_completions, "member_context")
+    normalize_names <- function(names) {
+        vapply(names, function(name) {
+            if (!startsWith(name, "`")) return(name)
+            tryCatch(as.character(str2lang(name)), error = function(e) name)
+        }, character(1L))
     }
-
+    # Drop enclosing candidates hidden by the method context. For source
+    # locals, use the final lexical value to choose the function/field item;
+    # this also removes duplicates when a local changes an outer binding kind.
+    keep_source <- function(names, functions) {
+        vapply(normalize_names(names), function(name) {
+            if (name %in% context$value$context_bindings) return(FALSE)
+            value <- context$value$fields[[name]]
+            if (!is.null(value$binding_cache)) {
+                value <- member_completion_value(value, context$index, context$budget)
+            }
+            if (is.null(value)) return(TRUE)
+            if (!length(value$type) && is.null(value$function_expr) && is.null(value$function_key)) {
+                # A method-local binding hides an outer function even when
+                # its value is opaque. Do not resurrect the outer call snippet.
+                if (name %in% context$value$context_locals) return(!functions)
+                if (!identical(value$reason, "formal")) return(TRUE)
+            }
+            is_function <- !is.null(value$function_expr) || !is.null(value$function_key) ||
+                "function" %in% value$type
+            identical(is_function, functions)
+        }, logical(1L))
+    }
+    # Classify ranked batches until the limit is filled, with one extra
+    # visible candidate to detect truncation. Hidden candidates do not consume
+    # slots, and rejected batches never repeat lexical binding inference.
+    symbol_count <- length(scope_symbol_names)
+    pending <- seq_along(candidate_names)
+    keep <- integer()
+    if (is.null(context$value)) {
+        truncated <- length(pending) > limit
+        keep <- completion_select_indices(candidate_names, candidate_names, token, limit)
+    } else {
+        target <- limit + 1L
+        ranked <- FALSE
+        first <- 1L
+        while (first <= length(pending) && length(keep) < target) {
+            batch <- if (ranked) {
+                last <- min(length(pending), first + target - length(keep) - 1L)
+                selected <- pending[seq.int(first, last)]
+                first <- last + 1L
+                selected
+            } else {
+                names <- candidate_names[pending]
+                pending[completion_select_indices(names, names, token, target - length(keep))]
+            }
+            functions <- batch > symbol_count
+            visible <- logical(length(batch))
+            visible[!functions] <- keep_source(candidate_names[batch[!functions]], FALSE)
+            visible[functions] <- keep_source(candidate_names[batch[functions]], TRUE)
+            keep <- c(keep, batch[visible])
+            if (!ranked && length(keep) < target) {
+                # Rank the remainder once if refilling is necessary, so a
+                # long run of hidden candidates cannot trigger repeated sorts.
+                pending <- pending[!pending %in% batch]
+                names <- candidate_names[pending]
+                pending <- pending[order(!startsWith(names, token), names, method = "radix")]
+                ranked <- TRUE
+            }
+        }
+        truncated <- length(keep) > limit
+        if (truncated) {
+            names <- candidate_names[keep]
+            keep <- keep[completion_select_indices(names, names, token, limit)]
+        }
+    }
+    symbol_keep <- keep[keep <= symbol_count]
+    function_keep <- keep[keep > symbol_count] - symbol_count
+    scope_symbol_names <- scope_symbol_names[symbol_keep]
+    scope_symbol_lines <- scope_symbol_lines[symbol_keep]
+    scope_funct_names <- scope_funct_names[function_keep]
+    scope_funct_lines <- scope_funct_lines[function_keep]
     scope_symbol_completions <- .mapply(function(symbol, line) {
         list(
             label = symbol,
@@ -794,7 +1002,7 @@ scope_completion <- function(uri, workspace, token, point,
                 kind = CompletionItemKind$Function,
                 detail = "[scope]",
                 sortText = paste0(sort_prefixes$scope, symbol),
-                insertText = paste0(symbol, "($0)"),
+                insertText = paste0(escape_completion_snippet(symbol), "($0)"),
                 insertTextFormat = InsertTextFormat$Snippet,
                 data = list(
                     type = "function",
@@ -819,10 +1027,28 @@ scope_completion <- function(uri, workspace, token, point,
         }, list(scope_funct_names, scope_funct_lines), NULL)
     }
 
-    completions <- c(scope_symbol_completions, scope_funct_completions)
+    completions <- c(scope_symbol_completions, scope_funct_completions, context_completions)
+    class_info <- attr(context_completions, "class_info")
+    for (i in seq_along(completions)) {
+        label <- completions[[i]]$label
+        if (startsWith(label, "`")) label <- tryCatch(as.character(str2lang(label)), error = function(e) label)
+        description <- class_info[[label]]
+        if (!is.null(description)) {
+            completions[[i]]$detail <- paste("[scope]", gsub("`", "", description, fixed = TRUE))
+            completions[[i]]$documentation <- list(kind = "markdown", value = description)
+        }
+    }
+    truncated <- truncated || isTRUE(attr(context_completions, "truncated")) ||
+        length(completions) > limit
+    if (length(completions) > limit) {
+        labels <- vapply(completions, `[[`, character(1L), "label")
+        sort_text <- vapply(completions, `[[`, character(1L), "sortText")
+        completions <- completions[completion_select_indices(labels, sort_text, token, limit)]
+    }
     if (truncated) {
         attr(completions, "truncated") <- TRUE
     }
+    attr(completions, "member_context") <- context
     completions
 }
 
@@ -837,7 +1063,7 @@ token_completion <- function(uri, workspace, token, exclude = NULL, limit = Inf)
         }
         symbols <- symbols[startsWith(symbols, token)]
     } else {
-        xdoc <- parse_data$xml_doc
+        xdoc <- parse_data_xml(parse_data)
         if (is.null(xdoc)) {
             return(list())
         }
@@ -885,10 +1111,177 @@ token_completion <- function(uri, workspace, token, exclude = NULL, limit = Inf)
     completions
 }
 
+completion_token <- function(document, point) {
+    result <- document$detect_token(point, forward = FALSE)
+    line <- document$line0(point$row)
+    quoted <- .Call("scan_backtick_completion_c", line, as.integer(point$col),
+        PACKAGE = "languageserver")
+    if (is.null(quoted)) return(result)
+
+    before <- substr(line, 1L, quoted$start)
+    # Member providers handle their own quoted names and replacement ranges.
+    if (grepl("[$@][ \\t]*$", before)) return(result)
+    namespace <- document$detect_token(
+        list(row = point$row, col = quoted$start), forward = FALSE)
+    result$package <- namespace$package
+    result$accessor <- namespace$accessor
+    result$full_token <- paste0("`", quoted$token)
+    result$token <- tryCatch(
+        as.character(str2lang(paste0("`", quoted$token, "`"))),
+        error = function(e) quoted$token
+    )
+    result$range <- list(
+        start = list(row = point$row, col = quoted$start),
+        end = list(row = point$row, col = quoted$end)
+    )
+    result$quoted <- TRUE
+    result
+}
+
+completion_has_call_parens <- function(document, token_result) {
+    line_text <- document$line0(token_result$range$end$row)
+    rest_of_line <- substr(
+        line_text,
+        token_result$range$end$col + 1L,
+        nchar(line_text)
+    )
+    startsWith(trimws(rest_of_line), "(")
+}
+
+#' Collect ordinary global declarations without evaluating source or function bodies
+#' @noRd
+completion_global_outline <- function(parsed) {
+    bindings <- new.env(hash = TRUE, parent = emptyenv())
+    controls <- c("{", "(", "if", "for", "while", "repeat", "system.time", "try", "tryCatch",
+        "withCallingHandlers", "withRestarts", "allowInterrupts", "suspendInterrupts",
+        "suppressPackageStartupMessages", "suppressMessages", "suppressWarnings")
+    walk <- function(expr, ref = NULL) {
+        if (is.expression(expr) || is.list(expr)) {
+            refs <- attr(expr, "srcref")
+            for (i in seq_along(expr)) walk(expr[[i]], if (length(refs) >= i) refs[[i]] else ref)
+        } else if (is_simple_call(expr)) {
+            head <- if (is.symbol(expr[[1L]])) as.character(expr[[1L]]) else fun_string(expr[[1L]])
+            if (head %in% c("<-", "=")) {
+                if (length(expr) == 3L && is.symbol(expr[[2L]])) {
+                    name <- as.character(expr[[2L]])
+                    assign(name, list(name = name, function_kind = member_head(expr[[3L]], "function"),
+                            line = if (is.null(ref)) 1L else ref[[1L]]), envir = bindings)
+                    walk(expr[[3L]], ref)
+                }
+            } else if (head %in% controls) {
+                if (head == "for" && is.symbol(expr[[2L]])) {
+                    name <- as.character(expr[[2L]])
+                    assign(name, list(name = name, function_kind = FALSE,
+                            line = if (is.null(ref)) 1L else ref[[1L]]), envir = bindings)
+                }
+                children <- as.list(expr)[-1L]
+                refs <- attr(expr, "srcref")
+                for (i in seq_along(children)) {
+                    if (!identical(children[[i]], quote(expr = ))) {
+                        walk(children[[i]], if (length(refs) >= i + 1L) refs[[i + 1L]] else ref)
+                    }
+                }
+            }
+        }
+        invisible(NULL)
+    }
+    walk(parsed)
+    as.list(bindings)
+}
+
+#' Build only lexical completion facts from the current buffer
+#' @noRd
+completion_outline <- function(document) {
+    cached <- document$completion_outline
+    if (!is.null(cached) && identical(cached$version, document$version)) return(cached$data)
+    # Bound synchronous work to the open buffer, independently of workspace
+    # size. Larger or incomplete buffers retain the queued current-parse path.
+    result <- NULL
+    if (length(document$content) <= 20000L &&
+            sum(nchar(document$content, type = "bytes")) <= 1024^2) {
+        content <- normalize_parse_content(document$content, document$is_rmarkdown, parseable_only = FALSE)
+        parsed <- tryCatch(parse(text = content, keep.source = TRUE), error = function(e) NULL)
+        if (!is.null(parsed)) {
+            data <- utils::getParseData(parsed)
+            # Execution and class contexts need the full scope provider.
+            contexts <- c("R6Class", member_s7_intrinsics, "with", "within", "local", "evalq",
+                "assign", "delayedAssign", "makeActiveBinding")
+            if (!any(data$token == "SYMBOL_FUNCTION_CALL" & data$text %in% contexts)) {
+                result <- tryCatch(list(completion_data = completion_parse_data(data, syntax_parse_data(data)),
+                        globals = completion_global_outline(parsed), sources = index_source_specs(parsed)), error = function(e) NULL)
+            }
+        }
+    }
+    document$completion_outline <- list(version = document$version, data = result)
+    result
+}
+
+#' Complete current lexical declarations and cached packages before full parsing
+#' @noRd
+basic_name_completion_reply <- function(id, workspace, document, point, capabilities) {
+    if (!check_scope(document$uri, document, point)) return(NULL)
+    line <- document$line0(point$row)
+    if (!grepl("^[[:blank:]]*[[:alpha:]_.][[:alnum:]_.]*[[:blank:]]*$", line)) return(NULL)
+    token <- completion_token(document, point)
+    if (!nzchar(token$token) || !is.null(token$package) || !identical(token$accessor, "")) return(NULL)
+    if (!is.null(member_cursor(document, point)) ||
+            !is.null(member_call_location(document, point, symbols = TRUE))) return(NULL)
+    if (is.null(workspace$namespaces)) return(NULL)
+    outline <- completion_outline(document)
+    if (is.null(outline)) return(NULL)
+    if (isTRUE(workspace$index$enabled) && length(outline$sources)) return(NULL)
+    # The first response must contain current local declarations: clients do
+    # not refresh a displayed list merely because its full parse finishes.
+    loaded <- loadedNamespaces()
+    ready <- list(loaded_packages = intersect(workspace$startup_packages, loaded),
+        imported_objects = collections::dict(),
+        get_namespace = function(package) workspace$namespaces$get(package, NULL),
+        get_parse_data = function(...) outline)
+    snippets <- isTRUE(capabilities$completionItem$snippetSupport) && lsp_settings$get("snippet_support")
+    limit <- lsp_settings$get("max_completions")
+    locals <- scope_completion(document$uri, ready, token$token, point, snippets, limit)
+    globals <- Filter(function(binding) match_with(binding$name, token$token), outline$globals)
+    global_names <- vapply(globals, `[[`, "", "name")
+    globals <- globals[completion_select_indices(global_names, global_names, token$token, limit)]
+    globals <- lapply(globals, function(binding) {
+        item <- list(label = binding$name,
+            kind = if (binding$function_kind) CompletionItemKind$Function else CompletionItemKind$Field,
+            detail = "[workspace]", sortText = paste0(sort_prefixes$workspace, binding$name),
+            data = list(type = if (binding$function_kind) "function" else "nonfunction",
+                uri = document$uri, line = binding$line))
+        inserted <- quote_completion_name(binding$name)
+        if (binding$function_kind && snippets) {
+            item$insertText <- paste0(escape_completion_snippet(inserted), "($0)")
+            item$insertTextFormat <- InsertTextFormat$Snippet
+        } else if (!identical(inserted, binding$name)) {
+            item$insertText <- inserted
+        }
+        item
+    })
+    local_names <- vapply(locals, function(item) {
+        name <- item$label
+        if (!startsWith(name, "`")) return(name)
+        tryCatch(as.character(parse(text = name)[[1L]]), error = function(e) name)
+    }, "")
+    globals <- Filter(function(item) !item$label %in% local_names, globals)
+    locals <- c(locals, globals)
+    local_names <- c(local_names, vapply(globals, `[[`, "", "label"))
+    packages <- workspace_completion(ready, token$token, snippet_support = snippets, limit = limit)
+    packages <- Filter(function(item) !item$label %in% local_names, packages)
+    items <- c(locals, packages)
+    if (!length(items)) return(NULL)
+    labels <- vapply(items, `[[`, "", "label")
+    sort_text <- vapply(items, `[[`, "", "sortText")
+    items <- items[completion_select_indices(labels, sort_text, token$token, limit)]
+    Response$new(id, result = list(isIncomplete = TRUE, items = unname(items)))
+}
+
 #' The response to a textDocument/completion request
 #' @noRd
 completion_reply <- function(id, uri, workspace, document, point, capabilities) {
-    if (!check_scope(uri, document, point)) {
+    if (!check_scope(uri, document, point) && is.null(member_cursor(document, point))) {
+        quoted <- if (isTRUE(lsp_settings$get("s3_dispatch")) && check_r_region(document, point)) s3_quoted_values(workspace, document, point)
+        if (!is.null(quoted)) return(Response$new(id, result = list(isIncomplete = FALSE, items = unname(quoted))))
         return(Response$new(
             id,
             result = list(
@@ -901,31 +1294,44 @@ completion_reply <- function(id, uri, workspace, document, point, capabilities) 
     snippet_support <- isTRUE(capabilities$completionItem$snippetSupport) &&
         lsp_settings$get("snippet_support")
     nmax <- lsp_settings$get("max_completions")
+    if (isTRUE(lsp_settings$get("member_completion"))) {
+        members <- tryCatch(member_completion(uri, workspace, document, point,
+            snippet_support, nmax), error = function(e) {
+                logger$info("static member completion:", e)
+                NULL
+            })
+        if (!is.null(members)) return(Response$new(id, result = list(
+            isIncomplete = isTRUE(attr(members, "truncated")), items = unname(members))))
+    }
 
-    token_result <- document$detect_token(point, forward = FALSE)
+    token_result <- completion_token(document, point)
 
     full_token <- token_result$full_token
     token <- token_result$token
     package <- token_result$package
+    function_snippet_support <- snippet_support &&
+        !completion_has_call_parens(document, token_result)
 
     completions <- list()
     providers_incomplete <- FALSE
+    member_context <- FALSE
 
+    if (is.null(package)) {
+        scope_completions <- scope_completion(uri, workspace, token, point,
+            function_snippet_support, nmax)
+        member_context <- attr(scope_completions, "member_context")
+        if (is.null(member_context)) member_context <- FALSE
+        providers_incomplete <- providers_incomplete ||
+            isTRUE(attr(scope_completions, "truncated"))
+        completions <- c(completions, scope_completions)
+    }
     if (nzchar(full_token)) {
         if (is.null(package)) {
-            scope_completions <- scope_completion(uri, workspace, token, point,
-                snippet_support, nmax)
-            providers_incomplete <- providers_incomplete ||
-                isTRUE(attr(scope_completions, "truncated"))
-            completions <- c(
-                completions,
-                constant_completion(token),
-                package_completion(token),
-                scope_completions)
+            completions <- c(completions, constant_completion(token), package_completion(token))
         }
         workspace_completions <- workspace_completion(
             workspace, token, package, token_result$accessor == "::",
-            snippet_support, nmax, uri = uri)
+            function_snippet_support, nmax, uri = uri)
         providers_incomplete <- providers_incomplete ||
             isTRUE(attr(workspace_completions, "truncated"))
         completions <- c(completions, workspace_completions)
@@ -933,13 +1339,30 @@ completion_reply <- function(id, uri, workspace, document, point, capabilities) 
 
     if (token_result$accessor == "") {
         call_result <- document$detect_call(point)
-        if (nzchar(call_result$token)) {
+        # An unresolved member access must not fall back to arguments of its
+        # enclosing call. Check before a quoted name so that operators within
+        # the name do not hide an accessor on the preceding line.
+        member_point <- if (isTRUE(token_result$quoted)) token_result$range$start else point
+        if (!is.null(call_result$opening)) {
+            string <- .Call("scan_closed_string_completion_c", document$line0(point$row),
+                as.integer(point$col), PACKAGE = "languageserver")
+            if (!is.null(string)) member_point <- list(row = point$row, col = string$start)
+        }
+        if (!is.null(call_result$opening) && is.null(member_cursor(document, member_point))) {
+            constructor_args <- if (isTRUE(lsp_settings$get("member_completion"))) {
+                member_constructor_arguments(uri, workspace, document, point, token, call_result)
+            }
+            s3 <- if (is.null(constructor_args)) tryCatch(resolve_s3_call(uri, workspace, document, point),
+                error = function(e) {
+                    logger$info("S3 completion:", e)
+                    NULL
+                })
             completions <- c(
                 completions,
-                arg_completion(uri, workspace, point, token,
+                if (!is.null(s3)) s3_arguments(s3, token) else if (!is.null(constructor_args)) constructor_args else if (nzchar(call_result$token)) arg_completion(uri, workspace, point, token,
                     call_result$token, call_result$package,
                     exported_only = call_result$accessor != ":::"),
-                arg_value_completion(uri, workspace, document, point, token,
+                if (!is.null(s3)) s3_argument_values(s3, token) else if (is.null(constructor_args) && nzchar(call_result$token)) arg_value_completion(uri, workspace, document, point, token,
                     call_result$token, call_result$package,
                     exported_only = call_result$accessor != ":::"))
         }
@@ -970,6 +1393,28 @@ completion_reply <- function(id, uri, workspace, document, point, capabilities) 
         isIncomplete <- FALSE
     }
 
+    if (isTRUE(lsp_settings$get("member_completion"))) {
+        completions <- member_class_completion_info(uri, workspace, document, point, token_result, completions,
+            resolved = member_context)
+    }
+
+    if (isTRUE(token_result$quoted)) {
+        edit_range <- range(
+            document$to_lsp_position(point$row, token_result$range$start$col),
+            document$to_lsp_position(point$row, token_result$range$end$col)
+        )
+        completions <- lapply(completions, function(item) {
+            inserted <- if (is.null(item$insertText)) item$label else item$insertText
+            item$textEdit <- text_edit(edit_range, inserted)
+            item$filterText <- if (is.null(item$data$package) && startsWith(item$label, "`")) {
+                item$label
+            } else {
+                encodeString(item$label, quote = "`")
+            }
+            item
+        })
+    }
+
     t1 <- Sys.time()
 
     logger$info("completions: ", list(
@@ -994,7 +1439,22 @@ completion_item_resolve_reply <- function(id, workspace, params, capabilities) {
     resolved <- FALSE
     if (is.null(params$data) || is.null(params$data$type)) {
     } else {
-        if (params$data$type == "package") {
+        if (params$data$type == "s3_parameter") {
+            params <- s3_resolve_parameter(workspace, params)
+            resolved <- TRUE
+        } else if (params$data$type == "member") {
+            if (isTRUE(capabilities$completionItem$labelDetailsSupport) &&
+                    !is.null(params$data$signature) && is.null(params$data$parameter)) params$labelDetails <- list(
+                detail = substring(params$data$signature, nchar(params$label) + 1L))
+            if (!is.null(params$data$package) && is.character(params$data$function_id) &&
+                    length(params$data$function_id) == 1L && !is.na(params$data$function_id)) {
+                doc <- workspace$get_documentation(params$data$function_id,
+                    params$data$package, isf = TRUE, uri = params$data$context_uri)
+                if (is.list(doc) && !is.null(doc$description)) params$documentation <- list(
+                    kind = "markdown", value = paste(c(params$documentation$value, doc$description), collapse = "\n\n"))
+            }
+            resolved <- TRUE
+        } else if (params$data$type == "package") {
             if (length(find.package(params$label, quiet = TRUE))) {
                 desc <- utils::packageDescription(params$label, fields = c("Title", "Description"))
                 description <- gsub("\\s*\n\\s*", " ", desc$Description)
@@ -1068,7 +1528,8 @@ completion_item_resolve_reply <- function(id, workspace, params, capabilities) {
             }
 
             if (!is.null(doc_string)) {
-                params$documentation <- list(kind = "markdown", value = doc_string)
+                params$documentation <- list(kind = "markdown",
+                    value = paste(c(params$documentation$value, doc_string), collapse = "\n\n"))
                 resolved <- TRUE
             }
         }

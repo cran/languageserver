@@ -1,9 +1,10 @@
-#' diagnostics
-#'
-#' Diagnose problems in files after linting.
-#'
-#' @name diagnostics
-NULL
+#' Identify the workspace symbols used by a diagnostic result
+#' @noRd
+diagnostics_workspace_generation <- function(workspace, uri) {
+    index <- workspace$index
+    if (is.null(index) || !isTRUE(index$enabled)) return(NULL)
+    index$diagnostics_generation(uri)
+}
 
 DiagnosticSeverity <- list(
     Error = 1,
@@ -11,154 +12,6 @@ DiagnosticSeverity <- list(
     Information = 3,
     Hint = 4
 )
-
-#' @rdname diagnostics
-#' @noRd
-diagnostic_range <- function(result, content) {
-    line <- result$line_number - 1
-    column <- result$column_number - 1
-    if (is.null(column) || is.na(column)) {
-        column <- 0
-    }
-    text <- if (line + 1 <= length(content)) content[line + 1] else ""
-    if (is.null(result$ranges)) {
-        cols <- code_point_to_unit(text, c(column, column + 1))
-        range(
-            start = position(line = line, character = cols[1]),
-            end = position(line = line, character = cols[2])
-        )
-    } else {
-        cols <- code_point_to_unit(text, c(result$ranges[[1]][1] - 1, result$ranges[[1]][2]))
-        range(
-            start = position(line = line, character = cols[1]),
-            end = position(line = line, character = cols[2])
-        )
-    }
-}
-
-#' @rdname diagnostics
-#' @noRd
-diagnostic_severity <- function(result) {
-    switch(result$type,
-        error = DiagnosticSeverity$Error,
-        warning = DiagnosticSeverity$Warning,
-        style = DiagnosticSeverity$Information,
-        DiagnosticSeverity$Information)
-}
-
-#' @rdname diagnostics
-#' @noRd
-diagnostic_from_lint <- function(result, content) {
-    list(
-        range = diagnostic_range(result, content),
-        severity = diagnostic_severity(result),
-        source = "lintr",
-        message = result$message,
-        code = result$linter,
-        codeDescription = list(
-            href = sprintf("https://lintr.r-lib.org/reference/%s.html", result$linter)
-        )
-    )
-}
-
-#' Find the lintr config file
-#' @noRd
-find_config <- function(filename) {
-    # instead of calling `lintr:::find_config` directly
-    # since CRAN doesn't like :::.
-    asNamespace("lintr")$find_config(filename)
-}
-
-#' Lint extracted R code using the settings and exclusions of its source file
-#' @noRd
-lint_literate_file <- function(path, content, linters, cache) {
-    # lintr 3.0 interprets text according to the filename's extension, even
-    # when it has already been extracted. Load the source file's settings
-    # separately so the line-preserving R content is not extracted again.
-    lintr_namespace <- asNamespace("lintr")
-    settings <- lintr_namespace$settings
-    previous_settings <- as.list(settings, all.names = TRUE)
-    on.exit({
-        rm(list = ls(settings, all.names = TRUE), envir = settings)
-        list2env(previous_settings, envir = settings)
-    })
-    lintr_namespace$read_settings(path)
-    lints <- lintr::lint(
-        text = content, linters = linters, cache = cache,
-        parse_settings = FALSE
-    )
-
-    # Inline linting uses a temporary filename. Restore the real filename
-    # before applying the config's file and line exclusions. Inline nolint
-    # comments have already been applied by lint().
-    lints[] <- lapply(lints, function(lint) {
-        # lintr normalizes exclusion paths to forward slashes on Windows too.
-        lint$filename <- normalizePath(path, winslash = "/", mustWork = FALSE)
-        lint
-    })
-    lintr_namespace$exclude(lints, lines = character())
-}
-
-#' Run diagnostic on a file
-#'
-#' Lint and diagnose problems in a file.
-#' @noRd
-diagnose_file <- function(uri, content, is_rmarkdown = FALSE, globals = NULL, cache = FALSE) {
-    if (length(content) == 0) {
-        return(list())
-    }
-
-    if (is_rmarkdown) {
-        content <- purl(content, parseable_only = TRUE)
-        if (!any(nzchar(trimws(content)))) {
-            return(list())
-        }
-    }
-
-    path <- path_from_uri(uri)
-
-    if (length(content) == 1) {
-        content <- c(content, "")
-    }
-
-    if (length(globals)) {
-        env_name <- "languageserver:globals"
-        do.call("attach", list(globals, name = env_name, warn.conflicts = FALSE))
-        on.exit(do.call("detach", list(env_name, character.only = TRUE)))
-    }
-
-    linters <- NULL
-    if (nzchar(path)) {
-        config_path <- tryCatch(find_config(path), error = function(e) NULL)
-        if (is.null(config_path) || !nzchar(config_path) || !file.exists(config_path)) {
-            linters <- lintr::linters_with_defaults()
-        }
-    } else {
-        linters <- lintr::linters_with_defaults()
-    }
-
-    if (nzchar(path) && is_rmarkdown) {
-        lints <- lint_literate_file(path, content, linters, cache)
-    } else if (nzchar(path)) {
-        lints <- lintr::lint(path,
-            cache = cache,
-            text = content,
-            parse_settings = TRUE,
-            linters = linters
-        )
-    } else {
-        lints <- lintr::lint(
-            text = content,
-            cache = cache,
-            parse_settings = TRUE,
-            linters = linters
-        )
-    }
-
-    diagnostics <- lapply(lints, diagnostic_from_lint, content = content)
-    names(diagnostics) <- NULL
-    diagnostics
-}
 
 diagnostics_callback <- function(self, uri, version, diagnostics, clear = FALSE) {
     workspace <- self$get_workspace(uri)
@@ -197,7 +50,8 @@ diagnostics_callback <- function(self, uri, version, diagnostics, clear = FALSE)
 schedule_diagnostics <- function(self, uri, document, delay = 0) {
     if (!lsp_settings$get("diagnostics")) return(NULL)
     temp_root <- dirname(tempdir())
-    if (path_has_parent(self$rootPath, temp_root) ||
+    # Only suppress temporary files when there is a non-temporary workspace.
+    if (!length(self$rootPath) || path_has_parent(self$rootPath, temp_root) ||
             !path_has_parent(path_from_uri(uri), temp_root)) {
         self$diagnostics_task_manager$add_task(
             uri,
@@ -207,68 +61,81 @@ schedule_diagnostics <- function(self, uri, document, delay = 0) {
 }
 
 
+diagnostics_cache_key <- function(uri, content, signature, generation = 0L) {
+    paste(uri, get_content_hash(content), digest::digest(list(backend_cache_identity(signature), generation),
+            algo = "xxhash64"), sep = "::")
+}
+
+# Function environments can contain instrumentation counters unrelated to
+# backend configuration. Keep code and environment identity without walking
+# those mutable environments when hashing an invocation.
+backend_cache_identity <- function(value) {
+    if (is.function(value)) return(list(
+        class = class(value), formals = deparse(formals(value)), body = deparse(body(value)),
+        environment = format(environment(value))))
+    if (is.environment(value)) return(format(value))
+    if (is.list(value)) return(list(class = class(value), values = lapply(value, backend_cache_identity)))
+    value
+}
+
+diagnostics_needs_workspace_globals <- function() {
+    tryCatch(isTRUE(backend_descriptor("diagnostics")$needs_workspace_globals), error = function(e) FALSE)
+}
+
 diagnostics_task <- function(self, uri, document, delay = 0) {
-    version <- document$version
-    content <- document$content
-
-    cache_ttl <- lsp_settings$get("diagnostics_cache_ttl")
-    if (is.null(cache_ttl)) {
-        cache_ttl <- 0
-    }
-    content_hash <- get_content_hash(content)
-    cache_key <- paste(uri, content_hash, sep = "::")
-
     workspace <- self$get_workspace(uri)
-
+    request <- tryCatch(backend_request("diagnostics", uri, document, workspace), error = function(error) {
+        failed <- backend_error_request("diagnostics", uri)
+        backend_track(self, failed, document, workspace)
+        diagnostics_callback(self, uri, document$version, list(), clear = TRUE)
+        backend_report(self, failed, error)
+        NULL
+    })
+    if (is.null(request)) return(NULL)
+    backend_track(self, request, document, workspace)
+    generation <- if (isTRUE(request$backend$needs_workspace_globals))
+        diagnostics_workspace_generation(workspace, uri) else NULL
+    document$diagnostics_generation <- generation
+    backend_revision <- backend_generation(self, "diagnostics")
+    cache_ttl <- lsp_settings$get("diagnostics_cache_ttl")
+    if (is.null(cache_ttl)) cache_ttl <- 0
+    cache_key <- diagnostics_cache_key(uri, request$content, request$signature, backend_revision)
     if (cache_ttl > 0 && workspace$diagnostics_cache$has(cache_key)) {
         cached_entry <- workspace$diagnostics_cache$get(cache_key)
         age <- as.numeric(difftime(Sys.time(), cached_entry$time, units = "secs"))
-        if (!is.na(age) && age <= cache_ttl) {
-            logger$info("diagnostics_task: cache hit for", uri)
-            diagnostics_callback(self, uri, version, cached_entry$diagnostics)
+        if (!is.na(age) && age <= cache_ttl && identical(cached_entry$generation, generation)) {
+            diagnostics_callback(self, uri, request$version, cached_entry$diagnostics)
             return(NULL)
         }
     }
-
-    globals <- if (!is.null(workspace$index) &&
-            isTRUE(workspace$index$enabled)) {
-        workspace$get_diagnostics_globals(uri)
-    } else if (is_package(workspace$root)) {
-        workspace$get_diagnostics_globals()
-    } else {
-        NULL
+    request$globals <- if (!isTRUE(request$backend$needs_workspace_globals)) NULL
+    else if (!is.null(workspace$index) && isTRUE(workspace$index$enabled)) workspace$get_diagnostics_globals(uri)
+    else if (is_package(workspace$root)) workspace$get_diagnostics_globals() else NULL
+    generation <- if (isTRUE(request$backend$needs_workspace_globals))
+        diagnostics_workspace_generation(workspace, uri) else NULL
+    document$diagnostics_generation <- generation
+    current <- function() {
+        backend_request_current(self, request, document, workspace, backend_revision) &&
+            (!isTRUE(request$backend$needs_workspace_globals) ||
+                    identical(generation, diagnostics_workspace_generation(workspace, uri)))
     }
-
-    create_task(
-        target = package_call(diagnose_file),
-        args = list(
-            uri = uri,
-            content = content,
-            is_rmarkdown = document$is_rmarkdown,
-            globals = globals,
-            cache = lsp_settings$get("lint_cache")
-        ),
+    create_task(target = package_call(run_backend), args = list(request = request),
         callback = function(result) {
-            if (cache_ttl > 0) {
-                workspace$diagnostics_cache$set(cache_key, list(
-                    time = Sys.time(),
-                    diagnostics = result
-                ))
+            if (!current()) return(NULL)
+            if (cache_ttl > 0) workspace$diagnostics_cache$set(cache_key,
+                list(time = Sys.time(), generation = generation, diagnostics = result))
+            diagnostics_callback(self, uri, request$version, result)
+        }, error = function(error) {
+            if (!current()) return(NULL)
+            logger$info("diagnostics_task:", error)
+            if (backend_unavailable(error)) {
+                diagnostics_callback(self, uri, request$version, list(), clear = TRUE)
+                backend_report(self, request, error)
+            } else {
+                diagnostics_callback(self, uri, request$version, list(list(
+                    range = range(position(0L, 0L), position(0L, 0L)),
+                    severity = DiagnosticSeverity$Error, source = request$backend$id,
+                    message = paste0("Failed to run diagnostics: ", conditionMessage(error)))))
             }
-            diagnostics_callback(self, uri, version, result)
-        },
-        error = function(e) {
-            logger$info("diagnostics_task:", e)
-            diagnostics_callback(self, uri, version, list(list(
-                range = range(
-                    start = position(0, 0),
-                    end = position(0, 0)
-                ),
-                severity = DiagnosticSeverity$Error,
-                source = "lintr",
-                message = paste0("Failed to run diagnostics: ", conditionMessage(e))
-            )))
-        },
-        delay = delay
-    )
+        }, delay = delay, track_descendants = !is.null(request$backend$executable))
 }

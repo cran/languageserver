@@ -1,3 +1,231 @@
+# languageserver 0.3.21
+
+- Preserve member completion for Polars conversions such as
+  `dt <- as_polars_df(iris)` and for `pl$` after calls using the converted frame.
+  Prepare bounded S3 method return summaries with their owning namespace.
+  Retain namespace ownership through chained methods and nested argument
+  expressions. Extend cold member analysis in place from 250 ms up to two
+  seconds of CPU time, allowing up to five seconds elapsed on busy hosts.
+  Retain node and depth bounds and cache completed uncertain receivers for
+  repeated completion, signature help and hover requests. Offer
+  common known method members as possible-receiver suggestions when a
+  conversion's input class is unresolved, without claiming a definite type.
+  Share these possible receivers with signature help and hover when the member
+  implementation is unambiguous, and display an uncertainty note. Preserve
+  possible results through member calls and subsequent assignments and aliases.
+  Reuse completed binding summaries across member-name and argument edits,
+  following-code changes and different cursor positions. Validate unchanged
+  preceding source and package attachment context without retaining source
+  closures or mutable object identities across edits.
+
+- Share bounded semantic analysis caches across member and S3 inference,
+  source signature/documentation providers and package NAMESPACE parsing.
+  Reuse completed S3 binding summaries across edits and cursor positions while
+  validating peer-source contents, metadata and registration context. Exclude
+  exhausted and scratch-state results from reuse. Retain exact-text signature
+  and documentation facts across reparses, including unchanged comment blocks
+  in persistent parse workers.
+
+- Persist package member models, startup datasets, S3 catalogs, documentation
+  summaries and rendered help in a shared bounded cache. Reuse unchanged models
+  across saves and server sessions; invalidate changes to package files,
+  loaded namespace values, dependencies, registered methods, cache format or
+  server implementation. Verify serialized payload checksums before restoring
+  cached values.
+
+- Avoid a server crash when completion, hover or signature help is requested
+  inside `function()`, `if`, `for` or `while` while package metadata is loading.
+  Report errors from queued request readiness checks without stopping the server.
+
+- Avoid suggesting function arguments after `$` or `@` inside a call when
+  member or slot completion cannot resolve the receiver, including names
+  enclosed in backticks, single quotes or double quotes.
+
+- Keep signature help visible while editing quoted and raw string arguments,
+  including strings spanning multiple lines.
+
+- Use LSP 3.18 capabilities for read-only generated package definitions,
+  linked editable names in extraction refactorings, and signature help with no
+  highlighted parameter when an argument matches no formal. Preserve existing
+  behavior for clients without these capabilities, and add documentation links
+  to compatible refactoring menus. Preserve multiline string contents during
+  extraction.
+
+- Restore nested sections, definitions and code chunks in document outlines
+  and breadcrumbs, preserving class member symbols (#814, #685).
+- Promote pending parses for outline requests after edits and report completed
+  parse-worker failures instead of leaving later outline requests queued.
+- Resolve ordinary S3 methods from statically inferred input classes for
+  argument completion, argument-value suggestions, hover and signature help
+  (#805). Share method identity and documentation across providers; support
+  source aliases, registered namespace methods, datasets, guarded constructors,
+  namespace-qualified calls and pipes. Preserve generic information when the
+  input or dispatch is uncertain, and allow S3 inference to be disabled with
+  `r.lsp.s3_dispatch` independently of member completion.
+
+- Select the correct active signature parameter and parameter-name inlay hints
+  in native and magrittr piped calls (including `%T>%`), accounting for the
+  implicit first argument and explicit native `_` or magrittr `.` placeholders.
+- Preserve member completion, hover and signatures for native pipe callees;
+  resolve piped class names and inheritance in type hierarchy; count bare
+  magrittr stages in call hierarchy and CodeLens. Allow extraction of independent
+  expressions inside pipe arguments, while keeping whole-RHS and placeholder-dependent
+  expressions in their pipe context; whole-pipe extraction remains available.
+
+- Restore diagnostics and queued document color/CodeLens replies when opening
+  files or untitled buffers without a workspace folder (#794).
+
+- Keep known R6 member signatures and hover when initializer analysis reaches
+  its inference limit. Select members directly from the inferred receiver and
+  allow more time in parallel tests without changing the normal request budget.
+
+- Complete bindings available in R6 method scopes, including `self`, `private`,
+  `super`, inherited members in non-portable classes, and nested closures,
+  using static context analysis during incomplete edits. Respect method-local
+  shadowing and prefer class bindings over enclosing declarations. Include
+  class information in completion, hover and signature help, and derive R6
+  `new()` signatures and argument completion from public initializers.
+
+- Preserve Polars member completion, signature help and hover when other
+  packages are cached. Prefer receiver roots over incidental exported names
+  and keep metadata requested by open documents ahead of background entries.
+  Retain compact inert snapshots so indexes evicted from the decoded cache
+  can be restored when multiple open documents need large package metadata.
+  Use compact catalogs for context selection and restore full namespace indexes
+  only when inference needs them, avoiding repeated eviction on each request.
+
+- Keep parameter-name inlay hints for untouched calls during incomplete edits,
+  moving their positions with incremental changes and refreshing after a valid
+  parse, so a temporary syntax error does not clear hints across the document.
+
+- Enclose non-syntactic completion names in backticks and preserve escaped names
+  in function snippets, including completion inside partially typed quoted names (#781).
+- Complete chained `$` members using static receiver analysis, including source
+  list/environment factories, declarative R6 classes and package method
+  registries. Package metadata is prepared in a background worker; completion
+  never calls document expressions, constructors, methods or active getters.
+- Preserve member completion for assigned and reassigned Polars query chains,
+  including DataFrame results after `collect()`, within the inference budget.
+- Use the same static member inference for signature help and hover, including
+  chained methods and named argument documentation. Member requests wait for the
+  current parse after edits, fixing stale completions on the first `$` trigger.
+- Resolve member names across line breaks and infer `self`, `super` and
+  `private` inside supported R6 methods for completion, hover and signatures.
+- Extend member completion, signature help and hover to package factories backed
+  by internal R6 classes and methods assigned during initialization. Support
+  namespace-qualified factories and R6 constructors without a `library()` call,
+  without executing constructors, methods or user arguments.
+- Complete S4 `@` slots from source declarations and installed class metadata,
+  including inheritance, aliases and factory results. Show slot types on hover
+  and signatures for slots whose function definitions are known statically.
+- Complete S7 `@` properties and constructor arguments from source declarations
+  and installed descriptors, with constructor/property hover and signatures.
+  Infer inheritance, nested properties and supported custom constructors
+  without calling constructors, getters, setters, validators or defaults.
+  Follow installed S7 constructor semantics, including 1.0 development class
+  references, forwarding constructors, named bindings, list property updates,
+  external class references, S4 parents and deprecation declarations.
+- Resolve `$` and `@` member completion, signature help, and hover for static
+  namespace objects, lists, data frames, pairlists, stored S4/R6 values, and
+  lazy-loaded package datasets without invoking custom accessors or coercion
+  hooks (#818).
+- Make `index_mode = "auto"` package-aware so standalone workspaces index open
+  files and their static `source()`/`sys.source()` dependencies lazily while
+  triggering shared background scans on demand for workspace symbols and global
+  references (#815).
+- Keep hover, signature help, and completion responsive while workspace indexing,
+  parsing, S3 catalog building, and member-model preparation run in the
+  background, streaming indexing progress via `window/workDoneProgress` (#812, #811, #798).
+- Support pluggable diagnostics and formatting backends through R adapters,
+  including built-in support for `jarl` diagnostics and `air` formatting
+  alongside the default `lintr` and `styler` backends (#809, #776). `lintr` and
+  `styler` have moved from `Imports` to `Suggests`, so the language server
+  itself does not require `lintr` or `styler` and
+  `install.packages("languageserver")` no longer installs them automatically;
+  users must install or upgrade `lintr` (>= 3.3.0-1) and install `styler` to
+  keep the default diagnostics and formatting, or select other backends.
+- Skip `COMMENT` parse nodes and ignore computed callees when resolving function
+  calls and placing inlay hints (#807, #800, #799).
+- Reduce worker scheduling, parse, and hot-path provider latency by precomputing
+  shared syntax/scope indexes in C, omitting eager XML serialization from worker
+  snapshots, and caching receiver analysis per document (#802, #795, #793).
+- Preserve R6 class context for `self`, `super`, `private`, and aliases after
+  member assignments within methods (#797).
+- Fix URI escaping for reserved filename characters, multiline `$`/`::`/`:::`
+  reference classification, overlapping raw-string scanning, and unsaved buffer
+  transfers across workspace folder changes (#796).
+- Require R (>= 4.0.0) and modernize R 4.0 syntax; require `lintr` (>= 3.3.0-1)
+  when using the `lintr` diagnostics backend, dropping legacy `lintr`
+  workarounds (#813, #783).
+- Honor `.lintr` settings from the working directory when linting pathless and
+  untitled documents (#782).
+- Prevent function completions from inserting duplicate call parentheses when
+  an opening parenthesis already follows the token (#779, #778).
+- Populate `NAMESPACE` imports and `DESCRIPTION` `Depends` packages in
+  diagnostics globals so `lintr::object_usage_linter()` recognizes imported
+  symbols and cross-file package functions (#775, #773, #652).
+- Preserve missing terminal newline state during diagnostics and provide a preferred quick fix for `trailing_blank_lines_linter` (#774, #772).
+- Respond to `shutdown` with a `null` result instead of `[]`, which clients that type the result strictly fail to decode (#789).
+
+**Closed issues:**
+
+- Hierarchical outline broken since 0.3.17 (#814)
+- Intellisense / suggestion of arguments not depending on input (#805)
+- No diagnostics, and documentColor/codeLens never answered, when the workspace folder is null (Windows, 0.3.20) (#794)
+- enclose non syntactic names in backticks (#781)
+- Existing brackets are ignored when function is autocompleted (#778)
+- Support pluggable linting and formatting backends (#776)
+- The object_usage_linter won't acknowledge bindings from @import or @importFrom (#773)
+- Missing terminal newline lint is not reported in VSCode Problem Pane (#772)
+- Autocompletion Slow (#687)
+- Auto-completion for S7 classes? (#682)
+- LSP diagnostics shows `lintr` error although `lintr::lint_package()` does not (#652)
+- lsp sees things that lintr doesnt (#567)
+- `languageserver` doesn't use `.lintr` file? (#557)
+
+**Merged pull requests:**
+
+- Cache package metadata across sessions and fix Polars member completion (#825)
+- Prevent server crash when editing function headers (#824)
+- Fix argument completion after member access (#820)
+- Fix signature help in quoted arguments (#819)
+- Fix member completion for static namespace objects (#818)
+- Add capability-gated LSP 3.18 editor improvements (#817)
+- Restore document outline hierarchy and recover outline requests after edits (#816)
+- Use package-aware indexing and faster workspace discovery (#815)
+- R 4.0.0 modernizations (#813)
+- Keep basic providers responsive during parsing and metadata preparation (#812)
+- Keep R providers responsive during large workspace indexing (#811)
+- Balance CI coverage across eight shards (#810)
+- Support pluggable diagnostics and formatting backends (#809)
+- Add static S3 dispatch to completion, hover and signature help (#808)
+- Ignore computed callees when resolving inlay hint function calls (#807)
+- Bump ghcr.io/rocker-org/devcontainer-features/r-rig from 1.2.4 to 2.0.0 (#804)
+- Handle pipe context across signature help, inlay hints, and providers (#803)
+- Reduce worker scheduling and parse latency (#802)
+- Fix diagnostics and pending replies in folderless sessions (#801)
+- Skip parser comments correctly throughout the codebase (#800)
+- Skip COMMENT nodes when placing inlay hints (#799)
+- Keep large workspace loading responsive and report indexing progress (#798)
+- Preserve R6 references after member assignments (#797)
+- Fix URI handling, references, raw strings, and workspace buffer transfers (#796)
+- Reduce hot-path latency with worker indexes and responsive scheduling (#795)
+- Reduce member completion, hover and signature-help latency (#793)
+- Preserve R6 member providers after inference timeouts (#792)
+- Complete and describe R6 scope symbols and constructor signatures (#791)
+- Keep Polars member providers available across metadata eviction (#790)
+- Respond to shutdown with `null` result instead of `[]` (#789)
+- Quote non-syntactic completion names and preserve snippet escapes (#788)
+- Stabilize inlay hints during incomplete edits (#787)
+- Extend member completion, signature help, and hover for R6 APIs (#786)
+- Fix member completion for assigned and collected Polars queries (#785)
+- Support static member and constructor intelligence for R6, S4 and S7 (#784)
+- Require lintr (>= 3.3.0-1) and drop workarounds for older lintr (#783)
+- fix: honor lintr settings for pathless documents (#782)
+- fix: preserve existing call parentheses in completions (#779)
+- Populate NAMESPACE and Depends imports in diagnostics globals for object_usage_linter() (#775)
+- Enable detecting missing terminal newline (#774)
+
 # languageserver 0.3.20
 
 - Run full-document, range, and multiple-range formatting in a lazy, cancellable

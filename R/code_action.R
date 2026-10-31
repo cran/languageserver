@@ -10,6 +10,13 @@ CodeActionKind <- list(
     SourceFixAll = "source.fixAll"
 )
 
+#' Test whether the client accepts snippets in versioned document edits
+#' @noRd
+code_action_snippet_support <- function(client_capabilities) {
+    workspace_edit <- client_capabilities$workspace$workspaceEdit
+    isTRUE(workspace_edit$documentChanges) && isTRUE(workspace_edit$snippetEditSupport)
+}
+
 #' Create a workspace edit for one document
 #' @noRd
 code_action_workspace_edit <- function(uri, edits, document = NULL,
@@ -195,17 +202,26 @@ code_action_direct_fix <- function(document, diagnostic) {
         title <- "Remove trailing whitespace"
         priority <- 70L
     } else if (identical(code, "trailing_blank_lines_linter")) {
-        if (any(nzchar(document$content[(row + 1L):document$nline]))) return(NULL)
-        edit <- text_edit(
-            range = range(
-                start = document$to_lsp_position(row, 0L),
-                end = document$to_lsp_position(
-                    document$nline - 1L, nchar(document$line(document$nline)))
-            ),
-            new_text = ""
-        )
-        title <- "Remove trailing blank lines"
-        priority <- 70L
+        if (grepl("terminal newline", message, fixed = TRUE)) {
+            if (row != document$nline - 1L || !nzchar(trimws(line))) return(NULL)
+            last_col <- nchar(line)
+            edit <- code_action_text_edit(
+                document, row, last_col, last_col, "\n")
+            title <- "Add a terminal newline"
+            priority <- 70L
+        } else {
+            if (any(nzchar(trimws(document$content[(row + 1L):document$nline])))) return(NULL)
+            edit <- text_edit(
+                range = range(
+                    start = document$to_lsp_position(row, 0L),
+                    end = document$to_lsp_position(
+                        document$nline - 1L, nchar(document$line(document$nline)))
+                ),
+                new_text = ""
+            )
+            title <- "Remove trailing blank lines"
+            priority <- 75L
+        }
     } else if (identical(code, "semicolon_linter")) {
         semicolon <- code_action_nearest_character(line, ";", start, end)
         if (is.null(semicolon)) return(NULL)
@@ -237,7 +253,7 @@ code_action_direct_fix <- function(document, diagnostic) {
         priority <- 30L
     } else if (identical(code, "equals_na_linter")) {
         source <- substr(line, start + 1L, end)
-        expression <- tryCatch(parse(text = source, keep.source = FALSE)[[1L]],
+        expression <- tryCatch(str2lang(source),
             error = function(e) NULL)
         if (is.null(expression) || !is.call(expression) || length(expression) != 3L ||
                 !as.character(expression[[1L]]) %in% c("==", "!=")) return(NULL)
@@ -251,7 +267,7 @@ code_action_direct_fix <- function(document, diagnostic) {
         } else {
             return(NULL)
         }
-        operand <- paste(deparse(operand, width.cutoff = 500L), collapse = " ")
+        operand <- deparse1(operand)
         replacement <- sprintf("is.na(%s)", operand)
         if (identical(as.character(expression[[1L]]), "!=")) {
             replacement <- paste0("!", replacement)
@@ -350,8 +366,8 @@ code_action_non_overlapping_fixes <- function(fixes) {
 #' @noRd
 code_action_nolint_edit <- function(document, row, linter = NULL) {
     line <- document$line0(row)
-    specific <- regexec("#\\s*nolint\\s*:\\s*([^.]*?)\\s*\\.", line, perl = TRUE)[[1L]]
-    all <- regexpr("#\\s*nolint\\s*$", line, perl = TRUE)
+    specific <- regexec(r"(#\s*nolint\s*:\s*([^.]*?)\s*\.)", line, perl = TRUE)[[1L]]
+    all <- regexpr(r"(#\s*nolint\s*$)", line, perl = TRUE)
 
     if (specific[[1L]] > 0L) {
         start <- specific[[1L]] - 1L

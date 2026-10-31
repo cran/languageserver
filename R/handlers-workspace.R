@@ -13,10 +13,47 @@ refresh_index_summary <- function(workspace, index, uri) {
     if (length(document_uri)) {
         doc <- workspace$documents$get(document_uri[[1L]])
         if (isTRUE(doc$is_open)) {
-            return(index$update_content(document_uri[[1L]], doc$content))
+            if (index$parse_failed(uri)) return(invisible(NULL))
+            if (!is.null(index$task_manager)) {
+                parsed <- if (identical(doc$content, doc$parsed_content)) doc$parse_data else NULL
+                if (!is.null(parsed$source_specs)) {
+                    return(index$update_content(document_uri[[1L]], doc$content,
+                            parse_data = parsed, cacheable = FALSE))
+                }
+                return(index$await_parse(document_uri[[1L]], cacheable = FALSE))
+            }
+            return(index$update_content(document_uri[[1L]], doc$content, cacheable = FALSE))
         }
     }
-    index$update_path(path_from_uri(uri))
+    if (is.null(index$task_manager)) index$update_path(path_from_uri(uri))
+    else index$queue_path(path_from_uri(uri))
+}
+
+#' Rebuild index policy while retaining open editor buffers
+#' @noRd
+reset_workspace_index <- function(self, workspace) {
+    open <- Filter(function(doc) isTRUE(doc$is_open), workspace$documents$values())
+    if (!is.null(workspace$index)) workspace$index$detach_worker()
+    workspace$index <- WorkspaceIndex$new(workspace$root)
+    self$load_workspace(workspace)
+    if (workspace$index$enabled) {
+        for (doc in open) {
+            if (!is.null(doc$parse_failure) && identical(doc$parse_failure$version, doc$version)) {
+                workspace$index$fail_parse(doc$uri)
+            } else if (identical(doc$version, doc$parse_data$version) && identical(doc$content, doc$parsed_content)) {
+                workspace$index$update_content(doc$uri, doc$content, cacheable = FALSE, parse_data = doc$parse_data)
+            } else {
+                self$text_sync(doc$uri, doc, parse = TRUE)
+            }
+            if (workspace$index$activate_package(doc$uri) && is.function(self$start_index_progress)) {
+                self$start_index_progress(workspace)
+            }
+        }
+        self$refresh_index_documents(workspace)
+    } else {
+        self$prune_legacy_documents(workspace)
+    }
+    invisible(NULL)
 }
 
 #' `workspace/didChangeWorkspaceFolders` notification handler
@@ -54,27 +91,42 @@ workspace_did_change_configuration <- function(self, params) {
         "index_max_files", "index_max_file_size_mb", "index_batch_size",
         "index_time_budget_ms", "index_persistent_cache"
     ))
+    previous_backends <- backend_settings_identity()
+    previous_s3 <- isTRUE(lsp_settings$get("s3_dispatch"))
+    previous_members <- isTRUE(lsp_settings$get("member_completion"))
     lsp_settings$update_from_workspace(settings)
 
-    if (length(index_settings)) {
+    if (!previous_members && isTRUE(lsp_settings$get("member_completion"))) {
         for (workspace in self$workspaces$values()) {
-            open_documents <- Filter(function(doc) isTRUE(doc$is_open),
-                workspace$documents$values())
-            workspace$index <- WorkspaceIndex$new(workspace$root)
-            self$load_workspace(workspace)
-            if (isTRUE(workspace$index$enabled)) {
-                for (doc in open_documents) {
-                    workspace$index$update_content(
-                        doc$uri, doc$content, cacheable = FALSE)
-                }
-                self$refresh_index_documents(workspace)
-            } else {
-                self$prune_legacy_documents(workspace)
+            if (is.function(workspace$load_startup_members)) workspace$load_startup_members()
+        }
+    }
+
+    if (!previous_s3 && isTRUE(lsp_settings$get("s3_dispatch")) &&
+            !is.null(self$resolve_task_manager)) {
+        for (workspace in self$workspaces$values()) {
+            for (document in workspace$documents$values()) {
+                parsed <- document$parse_data
+                if (!identical(document$version, parsed$version) || isTRUE(parsed$parse_error)) next
+                document$requested_packages <- member_package_request(parsed)
+                self$resolve_task_manager$add_task(document$uri,
+                    resolve_task(self, document$uri, document, document$requested_packages$packages,
+                        namespace_packages = document$requested_packages$namespace_packages))
             }
         }
     }
 
-    if (!lsp_settings$get("diagnostics")) {
+    if (length(index_settings)) {
+        for (workspace in self$workspaces$values()) {
+            reset_workspace_index(self, workspace)
+        }
+    }
+
+    backend_settings_changed(self, previous_backends)
+    sync_formatting_capabilities(self)
+
+    if (!lsp_settings$get("diagnostics") &&
+            identical(previous_backends[[1L]]$enabled, lsp_settings$get("diagnostics"))) {
         for (workspace in self$workspaces$values()) {
             for (uri in workspace$documents$keys()) {
                 if (!is.null(self$diagnostics_task_manager)) {
@@ -94,6 +146,7 @@ workspace_did_change_watched_files <- function(self, params) {
     for (file_event in params$changes) {
         uri <- uri_escape_unicode(file_event$uri)
         path <- path_from_uri(uri)
+        backend_watched_configuration(self, path)
         workspace <- self$get_workspace(uri)
 
         if (workspace$documents$has(uri)) {
@@ -107,14 +160,25 @@ workspace_did_change_watched_files <- function(self, params) {
         type <- file_event$type
         index <- workspace$index
         if (!is.null(index) && isTRUE(index$enabled)) {
+            if (basename(path) == "DESCRIPTION" && index$should_index(dirname(path), directory = TRUE)) {
+                root <- index_normalize_path(dirname(path))
+                relevant <- identical(root, index$root) || !index$is_lazy() || index$watches_package(root) ||
+                    any(vapply(workspace$documents$values(), function(doc) {
+                        isTRUE(doc$is_open) && path_has_parent(path_from_uri(doc$uri), file.path(root, "R"))
+                    }, logical(1L)))
+                if (relevant) reset_workspace_index(self, workspace)
+                next
+            }
             if (!index$should_index(path) && type != FileChangeType$Deleted) next
+            if (index$is_lazy() && !index$watches_path(path)) next
 
             dependents <- index$dependents(
                 uri, include_candidates = type == FileChangeType$Created)
             if (type == FileChangeType$Created ||
                     type == FileChangeType$Changed) {
                 logger$info("index", path)
-                index$update_path(path)
+                if (is.null(index$task_manager)) index$update_path(path)
+                else index$queue_path(path)
                 # A newly created file can make a previously unresolved
                 # static source call resolvable.
                 for (dependent in dependents) {
@@ -173,14 +237,8 @@ workspace_did_change_watched_files <- function(self, params) {
 #' Handler to the `workspace/symbol` [Request].
 #' @noRd
 workspace_symbol <- function(self, id, params) {
+    if (is.function(self$queue_index_request) &&
+            self$queue_index_request(id, "workspace/symbol", params, self$workspaces$values())) return(invisible(NULL))
     self$deliver(workspace_symbol_reply(
-            id, self$workspaces$values(), params$query))
-}
-
-#' `workspace/executeCommand` request handler
-#'
-#' Handler to the `workspace/executeCommand` [Request].
-#' @noRd
-workspace_execute_command <- function(self, id, params) {
-
+        id, self$workspaces$values(), params$query))
 }

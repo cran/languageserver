@@ -34,7 +34,7 @@ function_call_locations <- function(workspace, symbol, context_uri = NULL) {
             }
             next
         }
-        xdoc <- parse_data$xml_doc
+        xdoc <- parse_data_xml(parse_data)
         if (is.null(xdoc)) next
 
         nodes <- xml_find_all(
@@ -73,7 +73,7 @@ function_call_locations <- function(workspace, symbol, context_uri = NULL) {
 vscode_command_uri <- function(uri) {
     pattern <- paste0(
         "^([A-Za-z][A-Za-z0-9+.-]*):",
-        "(?://([^/?#]*))?([^?#]*)(?:\\?([^#]*))?(?:#(.*))?$"
+        r"((?://([^/?#]*))?([^?#]*)(?:\?([^#]*))?(?:#(.*))?$)"
     )
     parts <- regmatches(uri, regexec(pattern, uri, perl = TRUE))[[1L]]
     if (length(parts) != 6L) return(NULL)

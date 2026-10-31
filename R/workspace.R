@@ -51,12 +51,13 @@ ByteLruCache <- R6::R6Class(
         current_bytes = 0,
         max_bytes = NULL,
         max_entries = NULL,
-        trim = function() {
+        trim = function(protect = character()) {
             while (private$entries$size() > private$max_entries ||
                     private$current_bytes > private$max_bytes) {
                 keys <- private$entries$keys()
                 if (!length(keys)) break
-                self$remove(keys[[1L]])
+                candidates <- setdiff(keys, protect)
+                self$remove(if (length(candidates)) candidates[[1L]] else keys[[1L]])
             }
         }
     ),
@@ -74,16 +75,16 @@ ByteLruCache <- R6::R6Class(
             private$entries$set(key, value)
             value
         },
-        set = function(key, value) {
+        set = function(key, value, protect = character(), additional_bytes = 0) {
             if (private$entries$has(key)) self$remove(key)
-            size <- as.numeric(object.size(value))
+            size <- as.numeric(object.size(value)) + additional_bytes
             # An individual value larger than the whole budget would evict
             # every useful entry and still leave the cache over budget.
             if (size > private$max_bytes) return(invisible(NULL))
             private$entries$set(key, value)
             private$sizes$set(key, size)
             private$current_bytes <- private$current_bytes + size
-            private$trim()
+            private$trim(protect)
             invisible(value)
         },
         remove = function(key) {
@@ -101,8 +102,127 @@ ByteLruCache <- R6::R6Class(
             invisible(NULL)
         },
         size = function() private$entries$size(),
+        capacity = function() list(bytes = private$max_bytes, entries = private$max_entries),
         keys = function() private$entries$keys(),
         bytes = function() private$current_bytes
+    )
+)
+
+# Keep compact, inert snapshots when decoded package indexes compete for space.
+# A request can restore an evicted index without waiting for another package
+# resolution task or requiring an edit to the document's library calls.
+MemberMetadataCache <- R6::R6Class(
+    "MemberMetadataCache",
+    private = list(
+        snapshots = NULL, indexes = NULL, summaries = NULL, semantic_revision = 0L, cache_identity = NULL,
+        max_summary_bytes = NULL,
+        summary_sizes = function() {
+            vapply(private$summaries$values(), function(cache) {
+                if (is.null(cache$.bytes)) 0 else cache$.bytes
+            }, numeric(1L))
+        },
+        reserve_summary = function(size) {
+            if (size > private$max_summary_bytes) return(FALSE)
+            sizes <- private$summary_sizes()
+            total <- sum(sizes)
+            for (key in private$summaries$keys()) {
+                if (total + size <= private$max_summary_bytes) break
+                cache <- private$summaries$get(key)
+                # Clear the environment itself: decoded indexes may still
+                # reference it after another package becomes most recent.
+                total <- total - if (is.null(cache$.bytes)) 0 else cache$.bytes
+                rm(list = setdiff(ls(cache, all.names = TRUE), ".reserve"), envir = cache)
+                cache$.bytes <- 0
+            }
+            TRUE
+        },
+        summary_cache = function(key) {
+            cache <- private$summaries$pop(key, NULL)
+            if (is.null(cache)) cache <- new.env(parent = emptyenv())
+            # Inference reserves space before each write, including decoded
+            # cache hits, so retained summaries share one bounded budget.
+            cache$.reserve <- private$reserve_summary
+            private$summaries$set(key, cache)
+            cache
+        }
+    ),
+    public = list(
+        initialize = function(max_bytes, max_entries = 16L) {
+            private$cache_identity <- new.env(parent = emptyenv())
+            private$snapshots <- ByteLruCache$new(max_bytes, max_entries)
+            private$indexes <- ByteLruCache$new(max_bytes, max_entries)
+            private$summaries <- collections::ordered_dict()
+            private$max_summary_bytes <- min(max(as.numeric(max_bytes), 0), 4 * 1024^2)
+        },
+        has = function(key) private$snapshots$has(key),
+        get = function(key, default = NULL) {
+            if (!self$has(key)) return(default)
+            snapshot <- private$snapshots$get(key)
+            cache <- private$summary_cache(key)
+            if (private$indexes$has(key)) return(private$indexes$get(key))
+            # Snapshots were validated on insertion. Restoring their unchanged
+            # syntax need not hash every package definition on each request.
+            value <- unserialize(memDecompress(snapshot$compressed, "gzip"))
+            value$cache <- cache
+            private$indexes$set(key, value)
+            value
+        },
+        catalog = function(key) {
+            entry <- private$snapshots$get(key)
+            if (is.null(entry)) NULL else entry$catalog
+        },
+        set = function(key, value, protect = character()) {
+            snapshot <- as.list(value)
+            index <- member_index_thaw(snapshot)
+            if (is.null(index)) return(invisible(NULL))
+            private$semantic_revision <- private$semantic_revision + 1L
+            # A replacement must use validated returns and fresh summaries,
+            # even when the caller supplied an already decoded index.
+            value <- as.list(index)
+            snapshot$method_results <- index$method_results
+            snapshot$cache <- NULL
+            # Selection, imports and dispatch need only this compact catalog.
+            # Keep it in the snapshot budget without decoding function bodies.
+            fields <- c("package", "identity", "generation", "roots", "exports", "namespace_roots", "classes", "class_scope", "symbol_scope",
+                "s4_classes", "s4_dependencies", "s7_dependencies", "s7_capabilities", "dataset_only", "namespace_attempted",
+                "subset_registry", "subset_registry_complete")
+            entry <- list(
+                compressed = memCompress(serialize(snapshot, NULL), "gzip"),
+                catalog = snapshot[intersect(fields, names(snapshot))]
+            )
+            entry$catalog$functions <- Filter(function(name) {
+                member_head(snapshot$definitions[[name]], "function")
+            }, intersect(snapshot$exports, names(snapshot$definitions)))
+            private$snapshots$set(key, entry, protect)
+            private$indexes$remove(key)
+            private$summaries$pop(key, NULL)
+            if (self$has(key)) {
+                value$cache <- private$summary_cache(key)
+                private$indexes$set(key, value, protect)
+            }
+            for (expired in setdiff(private$indexes$keys(), self$keys())) private$indexes$remove(expired)
+            for (expired in setdiff(private$summaries$keys(), self$keys())) private$summaries$remove(expired)
+            invisible(value)
+        },
+        remove = function(key) {
+            if (self$has(key)) private$semantic_revision <- private$semantic_revision + 1L
+            private$snapshots$remove(key)
+            private$indexes$remove(key)
+            private$summaries$pop(key, NULL)
+            invisible(NULL)
+        },
+        clear = function() {
+            if (self$size()) private$semantic_revision <- private$semantic_revision + 1L
+            private$snapshots$clear()
+            private$indexes$clear()
+            private$summaries$clear()
+            invisible(NULL)
+        },
+        size = function() private$snapshots$size(),
+        revision = function() private$semantic_revision,
+        identity = function() private$cache_identity,
+        keys = function() private$snapshots$keys(),
+        bytes = function() private$snapshots$bytes() + private$indexes$bytes() + sum(private$summary_sizes())
     )
 )
 
@@ -115,26 +235,109 @@ ByteLruCache <- R6::R6Class(
 Workspace <- R6::R6Class("Workspace",
     private = list(
         scope_index = NULL,
-        scope_revision = NULL,
         scope_uris = NULL,
         scope_contexts = NULL,
+        scope_context_generations = NULL,
+        scope_reference_generations = NULL,
         scope_references = NULL,
         scope_namespaces = NULL,
         scope_namespace_sets = NULL,
+        import_globals_cache = NULL,
+        s3_package_cache = NULL,
+        s3_package_cache_state = NULL,
+        namespace_poll_time = -Inf,
+        namespace_poll_mtime = NULL,
         refresh_scope_cache = function(uris) {
-            revision <- self$index$revision
             if (is.null(private$scope_contexts) ||
                     !identical(private$scope_index, self$index) ||
-                    !identical(private$scope_revision, revision) ||
                     !identical(private$scope_uris, uris)) {
                 private$scope_index <- self$index
-                private$scope_revision <- revision
                 private$scope_uris <- uris
                 private$scope_contexts <- collections::dict()
                 private$scope_references <- collections::dict()
+                private$scope_context_generations <- collections::dict()
+                private$scope_reference_generations <- collections::dict()
                 private$scope_namespaces <- collections::dict()
                 private$scope_namespace_sets <- collections::dict()
             }
+        },
+        import_package_bindings = function(bindings, pkg, except = character(),
+            include_lazydata = FALSE) {
+            ns <- tryCatch(self$get_namespace(pkg), error = function(e) NULL)
+            if (is.null(ns)) return(FALSE)
+            nonfuncts <- ns$get_symbols(want_functs = FALSE, exported_only = TRUE)
+            if (include_lazydata) {
+                nonfuncts <- c(nonfuncts, ns$get_lazydata())
+            }
+            for (symbol in setdiff(nonfuncts, except)) {
+                bindings[[symbol]] <- NULL
+            }
+            for (symbol in setdiff(ns$get_symbols(want_functs = TRUE, exported_only = TRUE), except)) {
+                bindings[[symbol]] <- ns$get_diagnostic_stub(symbol)
+            }
+            TRUE
+        },
+        package_import_bindings = function(package_root) {
+            if (is.null(package_root) || !length(package_root) || !nzchar(package_root)) {
+                return(list())
+            }
+            key <- index_normalize_path(package_root)
+            desc_file <- file.path(package_root, "DESCRIPTION")
+            ns_file <- file.path(package_root, "NAMESPACE")
+            desc_mt <- if (file.exists(desc_file)) as.numeric(file.mtime(desc_file)) else NA_real_
+            ns_mt <- if (file.exists(ns_file)) as.numeric(file.mtime(ns_file)) else NA_real_
+            cached <- private$import_globals_cache$get(key, NULL)
+            is_fresh <- !is.null(cached) &&
+                identical(cached$desc_mt, desc_mt) &&
+                identical(cached$ns_mt, ns_mt) &&
+                !any(vapply(cached$missing_pkgs, function(pkg) {
+                    !is.null(tryCatch(self$get_namespace(pkg), error = function(e) NULL))
+                }, logical(1L)))
+            if (is_fresh) {
+                return(cached$bindings)
+            }
+            bindings <- new.env(hash = TRUE, parent = emptyenv())
+            missing_pkgs <- character()
+            for (pkg in extract_depends_packages(desc_file)) {
+                if (!private$import_package_bindings(bindings, pkg, include_lazydata = TRUE)) {
+                    missing_pkgs <- c(missing_pkgs, pkg)
+                }
+            }
+            ns_imports <- extract_namespace_imports(ns_file)
+            for (directive in ns_imports$directives) {
+                if (directive$type == "import") {
+                    for (pkg in directive$packages) {
+                        if (!private$import_package_bindings(
+                            bindings, pkg, except = directive$except
+                        )) {
+                            missing_pkgs <- c(missing_pkgs, pkg)
+                        }
+                    }
+                } else {
+                    ns <- tryCatch(self$get_namespace(directive$package), error = function(e) NULL)
+                    if (is.null(ns)) {
+                        missing_pkgs <- c(missing_pkgs, directive$package)
+                    }
+                    for (i in seq_along(directive$symbols)) {
+                        sym <- directive$symbols[[i]]
+                        target <- directive$targets[[i]]
+                        bindings[[sym]] <- if (is.null(ns)) {
+                            any_args_function
+                        } else {
+                            ns$get_diagnostic_stub(target)
+                        }
+                    }
+                }
+            }
+            result <- as.list(bindings, all.names = TRUE)
+            self$diagnostics_globals_cache <- NULL
+            private$import_globals_cache$set(key, list(
+                desc_mt = desc_mt,
+                ns_mt = ns_mt,
+                missing_pkgs = unique(missing_pkgs),
+                bindings = result
+            ))
+            result
         }
     ),
     public = list(
@@ -151,12 +354,17 @@ Workspace <- R6::R6Class("Workspace",
         namespace_file_mt = NULL,
 
         startup_packages = NULL,
+        startup_member_packages = NULL,
         loaded_packages = NULL,
         help_cache = NULL,
         parse_cache = NULL,  # Performance: Cache parse results by content hash
         diagnostics_cache = NULL,  # Performance: Cache diagnostics by content hash
         diagnostics_globals_cache = NULL,
         type_hierarchy_cache = NULL,
+        member_metadata = NULL,
+        analysis_caches = NULL,
+        s3_metadata = NULL,
+        s3_revision = 0L,
 
         initialize = function(root) {
             self$root <- root
@@ -167,11 +375,12 @@ Workspace <- R6::R6Class("Workspace",
             self$global_env <- GlobalEnv$new(self$documents)
             self$namespaces <- collections::dict()
             self$startup_packages <- workspace_startup_packages()
+            self$startup_member_packages <- character()
             self$loaded_packages <- self$startup_packages
             for (pkgname in self$loaded_packages) {
                 self$namespaces$set(pkgname, PackageNamespace$new(pkgname))
             }
-            self$help_cache <- collections::dict()
+            self$help_cache <- ByteLruCache$new(2 * 1024^2, 128L)
             parse_cache_mb <- lsp_settings$get("parse_cache_max_mb")
             if (!is.numeric(parse_cache_mb) || length(parse_cache_mb) != 1L ||
                     is.na(parse_cache_mb) || parse_cache_mb < 0) {
@@ -189,12 +398,36 @@ Workspace <- R6::R6Class("Workspace",
             self$diagnostics_cache <- ByteLruCache$new(
                 diagnostics_cache_mb * 1024^2, max_entries = 100L)
             self$diagnostics_globals_cache <- NULL
+            private$import_globals_cache <- collections::dict()
             self$type_hierarchy_cache <- collections::dict()
+            self$member_metadata <- MemberMetadataCache$new(32 * 1024^2, max_entries = 16L)
+            if (isTRUE(lsp_settings$get("member_completion"))) {
+                self$load_startup_members()
+            }
+            self$s3_metadata <- S3MetadataCache$new()
+            private$s3_package_cache <- ByteLruCache$new(1024^2, max_entries = 64L)
+            if (isTRUE(lsp_settings$get("s3_dispatch"))) {
+                for (package in names(workspace_startup_s3())) self$s3_metadata$set(package, workspace_startup_s3()[[package]])
+            }
+        },
+
+        load_startup_members = function() {
+            members <- workspace_startup_members()
+            packages <- intersect(self$startup_packages, names(members))
+            self$startup_member_packages <- union(intersect(self$startup_packages, self$startup_member_packages), packages)
+            for (package in packages) {
+                # A document may already have upgraded this dataset-only
+                # seed to a complete namespace model. Keep that valid model.
+                current <- self$member_metadata$catalog(package)
+                if (isTRUE(nzchar(current$generation))) next
+                self$member_metadata$set(package, members[[package]], protect = self$startup_member_packages)
+            }
+            invisible(NULL)
         },
 
         load_package = function(pkgname) {
             if (!(pkgname %in% self$loaded_packages)) {
-                ns <- self$get_namespace(pkgname)
+                ns <- tryCatch(self$get_namespace(pkgname), error = function(e) NULL)
                 logger$info("ns: ", ns)
                 if (!is.null(ns)) {
                     self$loaded_packages <- c(self$loaded_packages, pkgname)
@@ -219,9 +452,12 @@ Workspace <- R6::R6Class("Workspace",
             if (!self$index$contains_path(path_from_uri(uri))) {
                 return(all_uris)
             }
-            if (private$scope_contexts$has(uri)) {
+            generation <- self$index$scope_generation(uri)
+            if (private$scope_contexts$has(uri) &&
+                    identical(private$scope_context_generations$get(uri), generation)) {
                 return(private$scope_contexts$get(uri))
             }
+            if (private$scope_namespaces$has(uri)) private$scope_namespaces$remove(uri)
             package_root <- self$index$package_root_for_uri(uri)
             result <- if (!is.null(package_root)) {
                 all_uris[vapply(all_uris, function(document_uri) {
@@ -237,6 +473,7 @@ Workspace <- R6::R6Class("Workspace",
                 }, logical(1L))]
             }
             private$scope_contexts$set(uri, result)
+            private$scope_context_generations$set(uri, generation)
             result
         },
 
@@ -253,7 +490,9 @@ Workspace <- R6::R6Class("Workspace",
             if (!self$index$contains_path(definition_path)) {
                 return(self$document_uris_for_context(context_uri))
             }
-            if (private$scope_references$has(definition_uri)) {
+            generation <- self$index$scope_generation(definition_uri, references = TRUE)
+            if (private$scope_references$has(definition_uri) &&
+                    identical(private$scope_reference_generations$get(definition_uri), generation)) {
                 return(private$scope_references$get(definition_uri))
             }
             package_root <- self$index$package_root_for_uri(definition_uri)
@@ -271,6 +510,7 @@ Workspace <- R6::R6Class("Workspace",
                 }, logical(1L))]
             }
             private$scope_references$set(definition_uri, result)
+            private$scope_reference_generations$set(definition_uri, generation)
             result
         },
 
@@ -342,8 +582,10 @@ Workspace <- R6::R6Class("Workspace",
             } else if (self$namespaces$has(pkgname)) {
                 self$namespaces$get(pkgname)
             } else if (length(find.package(pkgname, quiet = TRUE))) {
-                ns <- PackageNamespace$new(pkgname)
-                self$namespaces$set(pkgname, ns)
+                ns <- tryCatch(PackageNamespace$new(pkgname), error = function(e) NULL)
+                if (!is.null(ns)) {
+                    self$namespaces$set(pkgname, ns)
+                }
                 ns
             } else {
                 NULL
@@ -384,19 +626,21 @@ Workspace <- R6::R6Class("Workspace",
             }
             # note: the parantheses are neccessary
             hfile <- tryCatch({
-                    if (is.null(pkgname)) {
-                        utils::help((topic))
-                    } else {
-                        utils::help((topic), (pkgname))
-                    }
-                },
-                error = function(e) character(0)
+                if (is.null(pkgname)) {
+                    utils::help((topic))
+                } else {
+                    utils::help((topic), (pkgname))
+                }
+            },
+            error = function(e) character(0)
             )
 
             if (length(hfile) > 0) {
-                key <- as.character(hfile)
+                identity <- tryCatch(package_metadata_help_identity(hfile), error = function(e) NULL)
+                key <- digest::digest(list(paths = as.character(hfile), identity = identity,
+                        context = package_metadata_help_context(), rich = lsp_settings$get("rich_documentation")), algo = "xxhash64")
                 if (self$help_cache$has(key)) {
-                    return(self$help_cache$get(key))
+                    self$help_cache$get(key)
                 } else {
                     result <- NULL
 
@@ -405,8 +649,8 @@ Workspace <- R6::R6Class("Workspace",
                             rmarkdown::pandoc_available()) {
                         html <- get_help(hfile, "html")
                         # Make header look prettier:
-                        pattern <- "<table.*?<td>(.*?)\\s*{(.*?)}<\\/td>.*?<\\/table>\\n*<h2>\\s*(.*?)\\s*<\\/h2>"
-                        replacement <- "<b>\\1</b> <i>{\\2}</i><p>\\3</p><hr/>"
+                        pattern <- r"(<table.*?<td>(.*?)\s*{(.*?)}<\/td>.*?<\/table>\n*<h2>\s*(.*?)\s*<\/h2>)"
+                        replacement <- r"(<b>\1</b> <i>{\2}</i><p>\3</p><hr/>)"
                         html <- gsub(pattern, replacement, html, perl = TRUE)
                         result <- html_to_markdown(html)
                     }
@@ -418,7 +662,7 @@ Workspace <- R6::R6Class("Workspace",
                     if (!is.null(result)) {
                         self$help_cache$set(key, result)
                     }
-                    return(result)
+                    result
                 }
             }
         },
@@ -438,7 +682,7 @@ Workspace <- R6::R6Class("Workspace",
         },
 
         get_definition = function(symbol, pkgname = NULL, exported_only = TRUE,
-            uri = NULL) {
+            uri = NULL, content_scheme = NULL) {
             if (is.null(pkgname)) {
                 pkgname <- self$guess_namespace(symbol, isf = FALSE, uri = uri)
                 if (is.null(pkgname)) {
@@ -447,7 +691,12 @@ Workspace <- R6::R6Class("Workspace",
             }
             ns <- self$get_namespace(pkgname, uri = uri)
             if (!is.null(ns)) {
-                ns$get_definition(symbol, exported_only = exported_only)
+                if (inherits(ns, "PackageNamespace")) {
+                    ns$get_definition(symbol, exported_only = exported_only,
+                        content_scheme = content_scheme)
+                } else {
+                    ns$get_definition(symbol, exported_only = exported_only)
+                }
             }
         },
 
@@ -490,7 +739,31 @@ Workspace <- R6::R6Class("Workspace",
             self$documents$get(uri, NULL)$parse_data
         },
 
+        invalidate_s3_context = function() {
+            self$s3_revision <- self$s3_revision + 1L
+            invisible(NULL)
+        },
+
+        get_s3_package_imports = function(uri) {
+            # Check scalar revisions and small package vectors before querying
+            # document scopes or iterating through individual disk summaries.
+            state <- list(index = self$index, index_revision = self$index$revision,
+                revision = self$s3_revision, documents = self$documents$size(),
+                startup = self$startup_packages, imported = self$imported_packages)
+            if (!identical(state, private$s3_package_cache_state)) {
+                private$s3_package_cache$clear()
+                private$s3_package_cache_state <- state
+            }
+            private$s3_package_cache$get(uri, NULL)
+        },
+
+        set_s3_package_imports = function(uri, packages) {
+            private$s3_package_cache$set(uri, packages)
+            invisible(NULL)
+        },
+
         update_loaded_packages = function() {
+            self$invalidate_s3_context()
             loaded_packages <- union(self$startup_packages, self$imported_packages)
             for (doc in self$documents$values()) {
                 loaded_packages <- union(loaded_packages, doc$loaded_packages)
@@ -501,26 +774,85 @@ Workspace <- R6::R6Class("Workspace",
         get_diagnostics_globals = function(uri = NULL) {
             if (!is.null(uri) && !is.null(self$index) &&
                     isTRUE(self$index$enabled)) {
-                globals <- new.env(parent = emptyenv())
+                if (!self$index$files$size() && !self$index$discovering) {
+                    self$index$discover(full = FALSE)
+                }
                 package_root <- self$index$package_root_for_uri(uri)
+                import_root <- if (!is.null(package_root)) {
+                    package_root
+                } else if (is_package(self$root)) {
+                    self$root
+                } else {
+                    NULL
+                }
+                globals <- list2env(
+                    private$package_import_bindings(import_root),
+                    hash = TRUE,
+                    parent = emptyenv()
+                )
                 uris <- if (is.null(package_root)) {
-                    self$index$source_closure(uri)
+                    self$index$source_closure(uri, update = TRUE)
                 } else {
                     self$index$package_source_uris(package_root)
                 }
                 for (summary_uri in uris) {
                     summary <- self$index$summaries$get(summary_uri, NULL)
+                    if (is.null(summary)) {
+                        if (is.null(self$index$task_manager)) {
+                            summary <- self$index$update_path(path_from_uri(summary_uri))
+                        } else {
+                            self$index$queue_path(path_from_uri(summary_uri), invalidate = FALSE)
+                        }
+                    }
                     if (is.null(summary)) next
-                    for (symbol in names(summary$definitions)) {
-                        globals[[symbol]] <- NULL
+                    doc <- self$documents$get(summary_uri, NULL)
+                    parse_data <- if (!is.null(doc)) doc$parse_data else NULL
+                    if (!is.null(parse_data) && (!identical(doc$content, doc$parsed_content) ||
+                                !identical(doc$version, parse_data$version) ||
+                                !identical(doc$index_content_hash, summary$content_hash))) parse_data <- NULL
+                    if (!is.null(parse_data)) {
+                        for (symbol in parse_data$nonfuncts) {
+                            if (nzchar(symbol) &&
+                                    !exists(symbol, envir = globals, inherits = FALSE)) {
+                                globals[[symbol]] <- NULL
+                            }
+                        }
+                        for (symbol in names(parse_data$functions)) {
+                            if (nzchar(symbol)) {
+                                globals[[symbol]] <- parse_data$functions[[symbol]]
+                            }
+                        }
+                    } else {
+                        for (symbol in names(summary$definitions)) {
+                            if (!nzchar(symbol)) next
+                            fn <- if (!is.null(summary$functions)) {
+                                summary$functions[[symbol]]
+                            } else {
+                                NULL
+                            }
+                            if (!is.null(fn)) {
+                                globals[[symbol]] <- fn
+                            } else if (!exists(symbol, envir = globals, inherits = FALSE)) {
+                                globals[[symbol]] <- NULL
+                            }
+                        }
                     }
                 }
                 return(globals)
             }
+            import_bindings <- if (is_package(self$root)) {
+                private$package_import_bindings(self$root)
+            } else {
+                list()
+            }
             if (!is.null(self$diagnostics_globals_cache)) {
                 return(self$diagnostics_globals_cache)
             }
-            globals <- new.env(parent = emptyenv())
+            globals <- list2env(
+                import_bindings,
+                hash = TRUE,
+                parent = emptyenv()
+            )
             if (is_package(self$root)) {
                 source_dir <- normalizePath(
                     file.path(self$root, "R"),
@@ -537,7 +869,10 @@ Workspace <- R6::R6Class("Workspace",
                     parse_data <- doc$parse_data
                     if (is.null(parse_data)) next
                     for (symbol in parse_data$nonfuncts) {
-                        globals[[symbol]] <- NULL
+                        if (nzchar(symbol) &&
+                                !exists(symbol, envir = globals, inherits = FALSE)) {
+                            globals[[symbol]] <- NULL
+                        }
                     }
                     list2env(parse_data$functions, globals)
                 }
@@ -547,20 +882,16 @@ Workspace <- R6::R6Class("Workspace",
         },
 
         update_parse_data = function(uri, parse_data) {
+            self$invalidate_s3_context()
+            previous_parse <- self$documents$get(uri)$parse_data
+            diagnostics_changed <- !identical(previous_parse$nonfuncts, parse_data$nonfuncts) ||
+                !identical(previous_parse$functions, parse_data$functions)
             self$diagnostics_globals_cache <- NULL
             self$type_hierarchy_cache$clear()
-            # IMPORTANT: Always create xml_doc in the main process from xml_data
-            # parse_document runs in a child process and cannot create xml_doc there
-            # because xml2 external pointers cannot cross process boundaries
-            if (!is.null(parse_data$xml_data)) {
-                parse_data$xml_doc <- tryCatch(
-                    xml2::read_xml(parse_data$xml_data), error = function(e) NULL)
-                if (!is.null(parse_data$xml_doc)) {
-                    attr(parse_data$xml_doc, "top_level_index") <-
-                        xdoc_top_level_index(parse_data$xml_doc)
-                }
-            }
+            # Indexed providers can publish immediately. Legacy providers
+            # materialize main-process XML through parse_data_xml on demand.
             self$documents$get(uri)$update_parse_data(parse_data)
+            if (!is.null(self$index)) self$index$finish_document(uri)
             if (!is.null(self$index) && isTRUE(self$index$enabled)) {
                 doc <- self$documents$get(uri)
                 index_uri <- index_canonical_uri(uri)
@@ -568,17 +899,20 @@ Workspace <- R6::R6Class("Workspace",
                 cacheable <- if (is.null(previous)) {
                     !isTRUE(doc$is_open)
                 } else {
-                    !identical(previous$cacheable, FALSE)
+                    !isFALSE(previous$cacheable)
                 }
                 summary <- self$index$update_content(
                     uri, doc$content, cacheable = cacheable,
-                    parse_data = if (is.null(parse_data$source_specs)) NULL else
-                        parse_data)
+                    parse_data = if (isTRUE(parse_data$parse_error) ||
+                            !is.null(parse_data$source_specs)) parse_data else NULL)
+                doc$index_content_hash <- summary$content_hash
                 if (is.null(parse_data$source_specs) && !is.null(summary) &&
                         !isTRUE(parse_data$parse_error)) {
                     summary$definitions <- as.list(parse_data$definitions)
+                    summary$functions <- as.list(parse_data$functions)
                     self$index$set_summary(summary)
                 }
+                if (diagnostics_changed) self$index$invalidate_document_diagnostics(uri)
             }
         },
 
@@ -595,42 +929,49 @@ Workspace <- R6::R6Class("Workspace",
                 return(NULL)
             }
             self$namespace_file_mt <- namespace_file_mt
-            exprs <- tryCatch(
-                parse(namespace_file),
-                error = function(e) list())
-            for (expr in exprs) {
-                if (!is.call(expr) || !is.name(expr[[1]])) {
-                    next
-                }
-                if (expr[[1]] == "import") {
-                    packages <- as.list(expr[-1])
-                    if (is.null(names(packages))) {
-                        packages <- as.character(packages)
-                    } else {
-                        # handle import(foo, except = c(bar))
-                        packages <- as.character(packages[names(packages) == ""])
-                    }
-                    logger$info("load packages:", packages)
-                    self$load_packages(packages)
-                    self$imported_packages <- c(self$imported_packages, packages)
-                } else if (expr[[1]] == "importFrom") {
-                    package <- as.character(expr[[2]])
-                    objects <- as.character(expr[3:length(expr)])
-                    logger$info("load package objects:", package, objects)
-                    for (object in objects) {
-                        self$imported_objects$set(object, package)
-                    }
-                }
+            self$diagnostics_globals_cache <- NULL
+            private$import_globals_cache$clear()
+            if (!is.null(self$diagnostics_cache)) {
+                self$diagnostics_cache$clear()
+            }
+            ns_imports <- extract_namespace_imports(namespace_file)
+            if (length(ns_imports$packages)) {
+                logger$info("load packages:", ns_imports$packages)
+                self$load_packages(ns_imports$packages)
+                self$imported_packages <- c(
+                    self$imported_packages, ns_imports$packages)
+            }
+            for (object in names(ns_imports$objects)) {
+                self$imported_objects$set(object, ns_imports$objects[[object]])
             }
             self$update_loaded_packages()
         },
 
-        poll_namespace_file = function() {
+        poll_namespace_file = function(throttle = FALSE) {
+            now <- proc.time()[[3L]]
+            if (isTRUE(throttle) && now - private$namespace_poll_time < 1 &&
+                    identical(private$namespace_poll_mtime, self$namespace_file_mt)) {
+                return(NULL)
+            }
+            private$namespace_poll_time <- now
+            private$namespace_poll_mtime <- self$namespace_file_mt
             if (length(self$root) == 0) {
                 return(NULL)
             }
             namespace_file <- file.path(self$root, "NAMESPACE")
             if (!file.exists(namespace_file)) {
+                if (!is.null(self$namespace_file_mt)) {
+                    self$namespace_file_mt <- NULL
+                    self$imported_objects$clear()
+                    self$imported_packages <- character(0)
+                    self$diagnostics_globals_cache <- NULL
+                    private$import_globals_cache$clear()
+                    if (!is.null(self$diagnostics_cache)) {
+                        self$diagnostics_cache$clear()
+                    }
+                    self$update_loaded_packages()
+                    return(invisible(TRUE))
+                }
                 return(NULL)
             }
             namespace_file_mt <- file.mtime(namespace_file)
@@ -642,7 +983,187 @@ Workspace <- R6::R6Class("Workspace",
                 self$imported_objects$clear()
                 self$imported_packages <- character(0)
                 self$import_from_namespace_file()
+                return(invisible(TRUE))
             }
+            NULL
         }
     )
 )
+
+extract_depends_packages <- function(desc_file) {
+    if (!file.exists(desc_file)) {
+        return(character())
+    }
+    depends <- tryCatch(
+        read.dcf(desc_file, fields = "Depends")[1L, 1L],
+        error = function(e) NA_character_
+    )
+    if (is.na(depends) || !nzchar(depends)) {
+        return(character())
+    }
+    dep_pkgs <- trimws(strsplit(depends, ",", fixed = TRUE)[[1L]])
+    dep_pkgs <- trimws(sub("\\s*\\([\\s\\S]*\\)$", "", dep_pkgs, perl = TRUE))
+    setdiff(dep_pkgs[nzchar(dep_pkgs)], "R")
+}
+
+extract_namespace_imports <- function(namespace_file) {
+    packages <- character()
+    objects <- list()
+    directives <- list()
+    if (!file.exists(namespace_file)) {
+        return(list(
+            packages = packages,
+            objects = objects,
+            directives = directives
+        ))
+    }
+    exprs <- tryCatch(
+        parse(namespace_file, keep.source = FALSE),
+        error = function(e) NULL
+    )
+    as_char <- function(args) {
+        vapply(args, function(x) {
+            if (is.character(x) || is.name(x)) as.character(x)[1L] else ""
+        }, character(1L), USE.NAMES = FALSE)
+    }
+    parse_directive <- function(expr) {
+        if (!is.call(expr) || !length(expr)) return(invisible(NULL))
+        op <- as.character(expr[[1L]])[1L]
+        if (op == "{") {
+            for (sub_expr in as.list(expr[-1L])) {
+                parse_directive(sub_expr)
+            }
+            return(invisible(NULL))
+        }
+        if (op == "if") {
+            cond <- tryCatch(
+                isTRUE(eval(expr[[2L]], baseenv())),
+                error = function(e) NA
+            )
+            if (is.na(cond)) {
+                if (length(expr) >= 3L) parse_directive(expr[[3L]])
+                if (length(expr) >= 4L) parse_directive(expr[[4L]])
+            } else if (cond) {
+                if (length(expr) >= 3L) parse_directive(expr[[3L]])
+            } else if (length(expr) >= 4L) {
+                parse_directive(expr[[4L]])
+            }
+            return(invisible(NULL))
+        }
+        if (op %in% c("=", "<-") && length(expr) >= 3L) {
+            parse_directive(expr[[3L]])
+            return(invisible(NULL))
+        }
+        if (length(expr) < 2L) return(invisible(NULL))
+        args <- as.list(expr[-1L])
+        arg_names <- names(args)
+        if (op == "import") {
+            is_except <- if (is.null(arg_names)) {
+                rep(FALSE, length(args))
+            } else {
+                arg_names == "except"
+            }
+            pkgs <- as_char(args[!is_except])
+            pkgs <- pkgs[nzchar(pkgs)]
+            if (!length(pkgs)) return(invisible(NULL))
+            except <- if (any(is_except)) {
+                ex_expr <- args[is_except][[1L]]
+                if (is.call(ex_expr) && identical(ex_expr[[1L]], quote(c))) {
+                    as_char(as.list(ex_expr[-1L]))
+                } else {
+                    as_char(list(ex_expr))
+                }
+            } else {
+                character()
+            }
+            except <- except[nzchar(except)]
+            packages <<- c(packages, pkgs)
+            directives[[length(directives) + 1L]] <<- list(
+                type = "import",
+                packages = pkgs,
+                except = except
+            )
+        } else if (op %in% c("importFrom", "importMethodsFrom") && length(args) >= 2L) {
+            pkg <- as_char(args[1L])
+            if (!nzchar(pkg)) return(invisible(NULL))
+            rest <- args[-1L]
+            if (!is.null(names(rest)) && "except" %in% names(rest)) {
+                return(invisible(NULL))
+            }
+            targets <- as_char(rest)
+            aliases <- names(rest)
+            syms <- targets
+            if (!is.null(aliases)) {
+                has_alias <- nzchar(aliases)
+                syms[has_alias] <- aliases[has_alias]
+            }
+            keep <- nzchar(syms) & nzchar(targets)
+            syms <- syms[keep]
+            targets <- targets[keep]
+            if (!length(syms)) return(invisible(NULL))
+            if (op == "importFrom") {
+                for (sym in syms) {
+                    objects[[sym]] <<- pkg
+                }
+            }
+            directives[[length(directives) + 1L]] <<- list(
+                type = op,
+                package = pkg,
+                symbols = syms,
+                targets = targets
+            )
+        }
+    }
+    for (expr in as.list(exprs)) {
+        parse_directive(expr)
+    }
+    list(
+        packages = unique(packages),
+        objects = objects,
+        directives = directives
+    )
+}
+
+# Prepared once in an isolated worker for a host session. If it fails, source
+# requests remain usable while later package resolution can supply metadata.
+workspace_startup_s3 <- local({
+    cached <- NULL
+    function() {
+        if (!is.null(cached)) return(cached)
+        packages <- workspace_startup_packages()
+        cached <<- tryCatch(callr::r(package_call(s3_prepare_packages),
+                args = list(packages = packages, cache_dir = package_metadata_cache_root()),
+                system_profile = FALSE, user_profile = FALSE,
+                timeout = if (identical(Sys.getenv("R_COVR"), "true")) 60 else 8),
+            error = function(e) {
+                logger$info("S3 startup metadata:", e)
+                list()
+            })
+        cached
+    }
+})
+
+# Startup datasets have no library() or namespace expression in the document.
+# Prepare their bounded member models once in an isolated worker, then share
+# only snapshots across workspaces. Failed workers can retry on a later setup.
+workspace_startup_members <- local({
+    cached <- NULL
+    previous <- NULL
+    function() {
+        requested <- list(packages = workspace_startup_packages(), lib_paths = .libPaths(),
+            cache_dir = package_metadata_cache_root())
+        if (!is.null(cached) && identical(requested, previous)) return(cached)
+        if (!length(requested$packages)) return(list())
+        result <- tryCatch(callr::r(package_call(member_prepare_startup_data), args = requested,
+                system_profile = FALSE, user_profile = FALSE,
+                timeout = if (identical(Sys.getenv("R_COVR"), "true")) 60 else 8),
+            error = function(e) {
+                logger$info("startup member metadata:", e)
+                NULL
+            })
+        if (is.null(result)) return(list())
+        cached <<- result
+        previous <<- requested
+        result
+    }
+})

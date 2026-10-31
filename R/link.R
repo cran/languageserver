@@ -10,8 +10,9 @@ document_link_reply <- function(id, uri, workspace, document, rootPath) {
         return(NULL)
     }
 
-    xdoc <- parse_data$xml_doc
-    if (!is.null(xdoc)) {
+    indexed <- parse_data$range_data$strings
+    xdoc <- if (is.null(indexed)) parse_data_xml(parse_data)
+    if (!is.null(indexed) || !is.null(xdoc)) {
         cached <- parse_data$link_strings_cache
         if (!is.null(cached) && identical(cached$content, document$content)) {
             strings <- cached$strings
@@ -19,7 +20,6 @@ document_link_reply <- function(id, uri, workspace, document, rootPath) {
             # String length: `@col2-@col1-1`
             # Limit string length to 255 to avoid potential PATH_MAX error on Windows
             # On macOS and Linux, PATH_MAX is much larger but we ignore the long strings at the moment.
-            indexed <- parse_data$range_data$strings
             if (is.null(indexed)) {
                 str_tokens <- xml_find_all(xdoc, "//STR_CONST[@line1=@line2 and @col2>@col1+1 and @col2<=@col1+256]")
                 indexed <- list(
@@ -32,7 +32,7 @@ document_link_reply <- function(id, uri, workspace, document, rootPath) {
             str_col1 <- indexed$col1
             str_col2 <- indexed$col2
             str_expr <- substr(document$content[str_line1], str_col1, str_col2)
-            str_texts <- tryCatch(as.character(parse(text = str_expr, keep.source = FALSE)),
+            str_texts <- tryCatch(as.character(str2expression(str_expr)),
                 error = function(e) NULL)
             unique_texts <- unique(str_texts)
             strings <- list(

@@ -1,0 +1,789 @@
+readiness_catalogs <- local({
+    cached <- NULL
+    function() {
+        if (is.null(cached)) cached <<- stats::setNames(lapply(startup_packages, s3_prepare_namespace), startup_packages)
+        cached
+    }
+})
+
+readiness_fixture <- function(content, .local_envir = parent.frame()) {
+    root <- withr::local_tempdir(.local_envir = .local_envir)
+    uri <- path_to_uri(file.path(root, "main.R"))
+    workspace <- testthat::with_mocked_bindings(Workspace$new(root),
+        workspace_startup_packages = function() startup_packages,
+        workspace_startup_s3 = readiness_catalogs,
+        .package = "languageserver")
+    document <- Document$new(uri, "r", 1L, content)
+    document$did_open()
+    workspace$documents$set(uri, document)
+    parsed <- parse_document(uri, content, include_xml = FALSE)
+    parsed$version <- document$version
+    workspace$update_parse_data(uri, parsed)
+    document$requested_packages <- list(packages = character(), namespace_packages = c("base", "pending"))
+    server <- new.env(parent = emptyenv())
+    server$get_workspace <- function(...) workspace
+    server$pending_replies <- collections::dict()
+    methods <- c("textDocument/completion", "textDocument/hover", "textDocument/signatureHelp")
+    server$pending_replies$set(uri, stats::setNames(lapply(methods, function(...) collections::queue()), methods))
+    server$request_handlers <- stats::setNames(list(text_document_completion, text_document_hover,
+            text_document_signature_help), methods)
+    server$replies <- list()
+    server$deliver <- function(response, ...) server$replies[[length(server$replies) + 1L]] <- response
+    server$resolve_task_manager <- list(has = function(...) TRUE, promote = function(...) NULL,
+        add_task = function(...) NULL)
+    server$parse_task_manager <- list(promote = function(...) NULL, add_task = function(...) NULL)
+    server$refresh_index_documents <- function(...) NULL
+    server$ClientCapabilities <- list()
+    list(server = server, workspace = workspace, document = document, uri = uri)
+}
+
+readiness_params <- function(fixture, row, col) {
+    list(textDocument = list(uri = fixture$uri), position = position(row, col))
+}
+
+readiness_package_fixture <- function() {
+    fixture <- readiness_fixture("findInterval(1, c(0, 2))", .local_envir = parent.frame())
+    workspace <- fixture$workspace
+    dir.create(file.path(workspace$root, "R"))
+    writeLines("Package: readinessfixture", file.path(workspace$root, "DESCRIPTION"))
+    workspace$documents$remove(fixture$uri)
+    workspace$index$remove(fixture$uri)
+    uri <- path_to_uri(file.path(workspace$root, "R", "main.R"))
+    document <- Document$new(uri, "r", 1L, fixture$document$content)
+    workspace$documents$set(uri, document)
+    parsed <- parse_document(uri, document$content, include_xml = FALSE)
+    parsed$version <- document$version
+    workspace$update_parse_data(uri, parsed)
+    fixture$uri <- uri
+    fixture$document <- document
+    fixture
+}
+
+readiness_peer <- function(fixture, name, content, full = TRUE) {
+    uri <- path_to_uri(file.path(fixture$workspace$root, "R", paste0(name, ".R")))
+    if (full) {
+        document <- Document$new(uri, "r", 1L, content)
+        fixture$workspace$documents$set(uri, document)
+        parsed <- parse_document(uri, content, include_xml = FALSE)
+        parsed$version <- document$version
+        fixture$workspace$update_parse_data(uri, parsed)
+    } else {
+        fixture$workspace$index$update_content(uri, content)
+    }
+    uri
+}
+
+ReadinessSyncServer <- R6::R6Class("ReadinessSyncServer",
+    inherit = LanguageServer,
+    private = list(finalize = function() NULL),
+    public = list(initialize = function(workspace) {
+        self$workspaces <- collections::dict()
+        self$workspaces$set(DEFAULT_WORKSPACE, workspace)
+        self$workspace_cache <- collections::dict()
+        self$pending_replies <- collections::dict()
+    })
+)
+
+readiness_masking_catalog <- function() {
+    list(schema = 1L, package = "masking", generation = "ready",
+        callables = "findInterval", objects = list(), dependencies = "base",
+        functions = list(findInterval = list(name = "findInterval", owner = "masking",
+                generic = list(name = "findInterval", formal = "x"), formals = as.pairlist(alist(x = , ... = )))),
+        methods = list("masking::findInterval.data.frame" = list(name = "findInterval.data.frame",
+                package = "masking", owner = "masking", generic = "findInterval", generic_package = "masking",
+                class = "data.frame", formals = as.pairlist(alist(x = , columns = NULL, ... = )))))
+}
+
+readiness_task_manager <- function() {
+    manager <- new.env(parent = emptyenv())
+    manager$tasks <- collections::dict()
+    manager$add_task <- function(uri, task) {
+        if (is.null(task)) manager$tasks$pop(uri, NULL) else manager$tasks$set(uri, task)
+    }
+    manager$cancel <- function(uri) manager$tasks$pop(uri, NULL)
+    manager$has <- function(uri) manager$tasks$has(uri)
+    manager$promote <- function(...) NULL
+    manager
+}
+
+test_that("cached generic help survives missing or failed startup S3 metadata", {
+    fixture <- readiness_fixture(c("print()", "base::print()", "summary(1)"))
+    for (failed in c(FALSE, TRUE)) {
+        fixture$workspace$s3_metadata <- S3MetadataCache$new()
+        if (failed) {
+            for (package in startup_packages) {
+                fixture$workspace$s3_metadata$set(package, list(schema = 1L, generation = "failed",
+                        functions = list(), callables = character(), methods = list(), objects = list(),
+                        error = "Startup metadata timed out"))
+            }
+        }
+        fixture$server$replies <- list()
+        for (row in 0:2) {
+            col <- c(6L, 12L, 8L)[[row + 1L]]
+            text_document_signature_help(fixture$server, row * 2L + 1L, readiness_params(fixture, row, col))
+            text_document_hover(fixture$server, row * 2L + 2L, readiness_params(fixture, row, col - 4L))
+        }
+        expect_length(fixture$server$replies, 6L)
+        for (reply in fixture$server$replies) {
+            if (!is.null(reply$result$signatures)) {
+                expect_match(reply$result$signatures[[1L]]$label, "(print|summary)\\(")
+            } else {
+                expect_match(paste(reply$result$contents, collapse = " "), "print|summary")
+            }
+        }
+        expect_true(all(vapply(fixture$server$pending_replies$get(fixture$uri),
+                    function(queue) queue$size() == 0L, logical(1L))))
+    }
+    fixture$document$set_content(2L, "print(data.frame(x = 1), )")
+    parsed <- parse_document(fixture$uri, fixture$document$content, include_xml = FALSE)
+    parsed$version <- fixture$document$version
+    fixture$workspace$update_parse_data(fixture$uri, parsed)
+    for (package in names(readiness_catalogs())) {
+        fixture$workspace$s3_metadata$set(package, readiness_catalogs()[[package]])
+    }
+    text_document_signature_help(fixture$server, 7L,
+        readiness_params(fixture, 0L, nchar(fixture$document$line0(0L)) - 1L))
+    expect_match(tail(fixture$server$replies, 1L)[[1L]]$result$signatures[[1L]]$label, "row.names = TRUE", fixed = TRUE)
+})
+
+test_that("basic function completion responds before and during document parsing", {
+    fixture <- readiness_fixture(c("pri", "value <- 1"))
+    fixture$server$ClientCapabilities <- list(textDocument = list(completion =
+                list(completionItem = list(snippetSupport = TRUE))))
+    # A cached namespace that has been unloaded must not be loaded by this path.
+    fixture$workspace$startup_packages <- c(startup_packages, "pending")
+    fixture$workspace$namespaces$set("pending", list(get_symbols = function(...) stop("loaded a cold namespace")))
+    testthat::local_mocked_bindings(member_completion = function(...) stop("waited for syntax"),
+        s3_call_packages = function(...) stop("scanned imports"), .package = "languageserver")
+    fixture$server$parse_task_manager$promote <- function(...) stop("waited for parse")
+    for (parsed in c(FALSE, TRUE)) {
+        if (!parsed) {
+            fixture$document$parse_data <- NULL
+        } else {
+            fixture$document$parse_data <- list(version = 1L)
+            fixture$document$set_content(2L, c("print", "value <- 1"))
+        }
+        text_document_completion(fixture$server, as.integer(parsed) + 1L,
+            readiness_params(fixture, 0L, nchar(fixture$document$line0(0L))))
+        result <- tail(fixture$server$replies, 1L)[[1L]]$result
+        expect_true(result$isIncomplete)
+        items <- Filter(function(item) identical(item$label, "print"), result$items)
+        expect_length(items, 1L)
+        expect_identical(items[[1L]]$kind, CompletionItemKind$Function)
+        expect_identical(items[[1L]]$insertText, "print($0)")
+        expect_identical(items[[1L]]$data, list(type = "function", package = "base"))
+        expect_identical(fixture$server$pending_replies$get(fixture$uri)$`textDocument/completion`$size(), 0L)
+    }
+})
+
+test_that("the first preparse response includes current local declarations", {
+    fixture <- readiness_fixture(c("hello <- function(value) value", "hel"))
+    fixture$document$parse_data <- NULL
+    fixture$server$parse_task_manager$promote <- function(...) stop("waited for full parse")
+    text_document_completion(fixture$server, 1L, readiness_params(fixture, 1L, 3L))
+    expect_length(fixture$server$replies, 1L)
+    items <- fixture$server$replies[[1L]]$result$items
+    hello <- Filter(function(item) identical(item$label, "hello"), items)
+    expect_length(hello, 1L)
+    expect_identical(hello[[1L]]$kind, CompletionItemKind$Function)
+    expect_identical(hello[[1L]]$data$uri, fixture$uri)
+    expect_identical(fixture$server$pending_replies$get(fixture$uri)$`textDocument/completion`$size(), 0L)
+
+    # A structural edit must replace the outline rather than preserve a stale
+    # declaration from the first response. No second request is needed to fix it.
+    fixture$document$set_content(2L, c("helpful <- function(value) value", "hel"))
+    text_document_completion(fixture$server, 2L, readiness_params(fixture, 1L, 3L))
+    names <- vapply(fixture$server$replies[[2L]]$result$items, `[[`, "", "label")
+    expect_true("helpful" %in% names)
+    expect_false("hello" %in% names)
+    fixture$document$set_content(3L, c("for (hello in 1:3) { hello <- hello + 1 }", "hel"))
+    text_document_completion(fixture$server, 3L, readiness_params(fixture, 1L, 3L))
+    hello <- Filter(function(item) identical(item$label, "hello"), fixture$server$replies[[3L]]$result$items)
+    expect_length(hello, 1L)
+    expect_identical(hello[[1L]]$kind, CompletionItemKind$Field)
+})
+
+test_that("preparse outlines preserve lexical scope and local masking", {
+    fixture <- readiness_fixture(c("outer <- function(hidden) { hidden_local <- 1 }",
+            "f <- function(print) {", "  primary <- function(value) value", "  pri", "}"))
+    fixture$document$parse_data <- NULL
+    text_document_completion(fixture$server, 1L, readiness_params(fixture, 3L, 5L))
+    items <- fixture$server$replies[[1L]]$result$items
+    print <- Filter(function(item) identical(item$label, "print"), items)
+    expect_length(print, 1L)
+    expect_identical(print[[1L]]$kind, CompletionItemKind$Field)
+    expect_true("primary" %in% vapply(items, `[[`, "", "label"))
+    fixture$document$set_content(2L, c("f <- function(`print`) {", "  pri", "}"))
+    text_document_completion(fixture$server, 2L, readiness_params(fixture, 1L, 5L))
+    print <- Filter(function(item) item$label %in% c("print", "`print`"), fixture$server$replies[[2L]]$result$items)
+    expect_length(print, 1L)
+    expect_identical(print[[1L]]$kind, CompletionItemKind$Field)
+    fixture$document$set_content(3L, c("outer <- function(hidden) { hidden_local <- 1 }",
+            "f <- function(print) {", "  primary <- function(value) value", "  pri", "}"))
+    items <- basic_name_completion_reply(2L, fixture$workspace, fixture$document,
+        list(row = 3L, col = 2L), list())
+    expect_null(items)
+    fixture$document$set_content(4L, c("outer <- function(hidden) { hidden_local <- 1 }", "hidden"))
+    expect_null(basic_name_completion_reply(3L, fixture$workspace, fixture$document,
+            list(row = 1L, col = 6L), list()))
+})
+
+test_that("uncertain and oversized outlines wait for the full current parse", {
+    fixture <- readiness_fixture("pri")
+    for (content in list(c("hello <- function() {", "pri"),
+            c("with(data, {", "pri", "})"), c(paste0("#", strrep("x", 1024^2)), "pri"))) {
+        fixture$document$set_content(2L, content)
+        row <- match("pri", content) - 1L
+        expect_null(basic_name_completion_reply(1L, fixture$workspace, fixture$document,
+                list(row = row, col = 3L), list()))
+    }
+})
+
+test_that("preparse completion leaves contextual and unmatched names to the current parse", {
+    fixture <- readiness_fixture("pri")
+    for (line in c("value <- pri", "base::pri", "object$pri", "print(pri)", "# pri", '"pri"', "my_local_name")) {
+        fixture$document$set_content(2L, line)
+        expect_null(basic_name_completion_reply(1L, fixture$workspace, fixture$document,
+                list(row = 0L, col = nchar(line)), list()))
+    }
+    for (prefix in c("object$", "print(")) {
+        fixture$document$set_content(2L, c(prefix, "pri"))
+        expect_null(basic_name_completion_reply(1L, fixture$workspace, fixture$document,
+                list(row = 1L, col = 3L), list()))
+    }
+    fixture$document$set_content(3L, c("print <- function(local_arg) local_arg", "print", "print(1)"))
+    parsed <- parse_document(fixture$uri, fixture$document$content, include_xml = FALSE)
+    parsed$version <- fixture$document$version
+    fixture$workspace$update_parse_data(fixture$uri, parsed)
+    text_document_completion(fixture$server, 1L, readiness_params(fixture, 1L, 5L))
+    item <- Filter(function(item) identical(item$label, "print"), fixture$server$replies[[1L]]$result$items)[[1L]]
+    expect_identical(item$data$package, WORKSPACE)
+    text_document_signature_help(fixture$server, 2L, readiness_params(fixture, 2L, 6L))
+    expect_match(fixture$server$replies[[2L]]$result$signatures[[1L]]$label, "local_arg", fixed = TRUE)
+
+    literate <- Document$new(sub("\\.R$", ".Rmd", fixture$uri), "rmd", 1L, c("pri", "```{r}", "\tpri", "```"))
+    expect_null(basic_name_completion_reply(3L, fixture$workspace, literate, list(row = 0L, col = 3L), list()))
+    expect_true(basic_name_completion_reply(4L, fixture$workspace, literate, list(row = 2L, col = 4L), list())$result$isIncomplete)
+})
+
+test_that("verified S7 constructors use member readiness independently of S3 catalogs", {
+    skip_if_not_installed("S7")
+    snapshot <- member_prepare_package("S7")
+    lines <- c("library(S7)", "Dog <- new_class('Dog', properties = list(age = class_numeric))", "Dog(age = )")
+    fixture <- readiness_fixture(lines)
+    fixture$document$requested_packages <- list(packages = "S7", namespace_packages = character())
+    expect_null(fixture$workspace$s3_metadata$catalog("S7"))
+    point <- list(row = 2L, col = 10L)
+    expect_true(s3_metadata_waiting(fixture$server, fixture$uri, fixture$document, point))
+    text_document_signature_help(fixture$server, 1L, readiness_params(fixture, 2L, 10L))
+    expect_length(fixture$server$replies, 0L)
+    expect_identical(fixture$server$pending_replies$get(fixture$uri)$`textDocument/signatureHelp`$size(), 1L)
+    fixture$workspace$member_metadata$set("S7", snapshot)
+    expect_false(s3_metadata_waiting(fixture$server, fixture$uri, fixture$document, point))
+    drained <- drain_pending_replies(fixture$server, fixture$uri, fixture$document$version)
+    expect_identical(drained$processed, 1L)
+    expect_length(fixture$server$replies, 1L)
+    expect_identical(fixture$server$replies[[1L]]$result$signatures[[1L]]$label, "Dog(age = integer(0))")
+    expect_identical(fixture$server$pending_replies$get(fixture$uri)$`textDocument/signatureHelp`$size(), 0L)
+    fixture$workspace$member_metadata$remove("S7")
+    expect_true(s3_metadata_waiting(fixture$server, fixture$uri, fixture$document, point))
+    masked <- readiness_fixture(c("library(S7)", "library(pending)", lines[2:3]))
+    masked$workspace$member_metadata$set("S7", snapshot)
+    masked$document$requested_packages <- list(packages = c("S7", "pending"), namespace_packages = character())
+    expect_true(s3_metadata_waiting(masked$server, masked$uri, masked$document, list(row = 3L, col = 10L)))
+})
+
+test_that("cached but unloaded namespaces still preserve pending masking", {
+    fixture <- readiness_fixture(c("library(masking)", "print()", "masking::print()"))
+    fixture$document$requested_packages <- list(packages = "masking", namespace_packages = "base")
+    fixture$workspace$namespaces$set("masking", list(exists_funct = function(...) stop("loaded a cold namespace")))
+    expect_true(s3_metadata_waiting(fixture$server, fixture$uri, fixture$document, list(row = 1L, col = 6L)))
+    expect_true(s3_metadata_waiting(fixture$server, fixture$uri, fixture$document, list(row = 2L, col = 15L)))
+})
+
+test_that("generic providers do not wait for member-completion model preparation", {
+    fixture <- readiness_fixture("print()")
+    server <- fixture$server
+    server$resolve_task_manager <- readiness_task_manager()
+    server$member_task_manager <- readiness_task_manager()
+    prepare_calls <- 0L
+    testthat::local_mocked_bindings(member_prepare_package = function(...) {
+        prepare_calls <<- prepare_calls + 1L
+        list(schema = 1L, roots = list(), namespace_roots = list(), generation = "fixture")
+    }, .package = "languageserver")
+    task <- resolve_task(server, fixture$uri, fixture$document, character(), namespace_packages = c("base", "pending"))
+    server$resolve_task_manager$add_task(fixture$uri, task)
+    expect_true(server$member_task_manager$has(fixture$uri))
+    member_task <- server$member_task_manager$tasks$get(fixture$uri)
+    expect_true(fixture$workspace$index$indexing_status()$done)
+    text_document_signature_help(server, 1L, readiness_params(fixture, 0L, 6L))
+    text_document_hover(server, 2L, readiness_params(fixture, 0L, 2L))
+    expect_length(server$replies, 2L)
+    private <- task$.__enclos_env__$private
+    expect_false(private$args$prepare)
+    result <- do.call(private$target, private$args)
+    expect_identical(prepare_calls, 0L)
+    server$resolve_task_manager$cancel(fixture$uri)
+    private$callback(result)
+    expect_true(server$member_task_manager$has(fixture$uri))
+    expect_identical(server$member_task_manager$tasks$get(fixture$uri), member_task)
+    expect_length(server$replies, 2L)
+    replies <- stats::setNames(server$replies, vapply(server$replies, function(reply) as.character(reply$id), ""))
+    expect_match(replies$`1`$result$signatures[[1L]]$label, "print(x", fixed = TRUE)
+    expect_match(paste(replies$`2`$result$contents, collapse = " "), "print", fixed = TRUE)
+    model <- server$member_task_manager$tasks$get(fixture$uri)$.__enclos_env__$private
+    expect_true(model$args$prepare)
+    expect_false(model$args$prepare_s3)
+
+    resolve_task(server, fixture$uri, fixture$document, character(), namespace_packages = "base")
+    expect_true(server$member_task_manager$has(fixture$uri))
+    expect_false(identical(server$member_task_manager$tasks$get(fixture$uri), member_task))
+    resolve_task(server, fixture$uri, fixture$document, character(), namespace_packages = character())
+    expect_false(server$member_task_manager$has(fixture$uri))
+})
+
+test_that("member models finish independently of pending and failed S3 resolution", {
+    testthat::local_mocked_bindings(member_prepare_package = function(...) {
+        list(schema = 1L, roots = list(), namespace_roots = list(), generation = "fixture")
+    }, .package = "languageserver")
+    for (failed in c(FALSE, TRUE)) {
+        fixture <- readiness_fixture("print()")
+        server <- fixture$server
+        server$resolve_task_manager <- readiness_task_manager()
+        server$member_task_manager <- readiness_task_manager()
+        task <- resolve_task(server, fixture$uri, fixture$document, character(), namespace_packages = "pending")
+        server$resolve_task_manager$add_task(fixture$uri, task)
+        member <- server$member_task_manager$tasks$get(fixture$uri)$.__enclos_env__$private
+        expect_false(member$args$prepare_s3)
+        if (failed) task$.__enclos_env__$private$error(simpleError("S3 preparation timed out"))
+        member$callback(do.call(member$target, member$args))
+        expect_true(server$resolve_task_manager$has(fixture$uri))
+        expect_identical(fixture$workspace$member_metadata$catalog("pending")$generation, "fixture")
+        text_document_signature_help(server, 1L, readiness_params(fixture, 0L, 6L))
+        text_document_hover(server, 2L, readiness_params(fixture, 0L, 2L))
+        expect_length(server$replies, 2L)
+        expect_match(server$replies[[1L]]$result$signatures[[1L]]$label, "print(x", fixed = TRUE)
+    }
+})
+
+test_that("resolve completion wakes requests even if result application fails or is stale", {
+    fixture <- readiness_fixture("print()")
+    server <- fixture$server
+    queued <- character()
+    server$queue_pending_replies <- function(uri) queued <<- c(queued, uri)
+    load <- fixture$workspace$load_packages
+    unlockBinding("load_packages", fixture$workspace)
+    fixture$workspace$load_packages <- function(...) stop("cannot apply package metadata")
+    withr::defer(fixture$workspace$load_packages <- load)
+    expect_error(resolve_callback(server, fixture$uri, 1L, startup_packages), "cannot apply package metadata")
+    expect_identical(queued, fixture$uri)
+    queued <- character()
+    fixture$document$version <- 2L
+    expect_null(resolve_callback(server, fixture$uri, 1L, startup_packages))
+    expect_identical(queued, fixture$uri)
+})
+
+test_that("ordinary providers respond while unrelated package metadata is pending", {
+    fixture <- readiness_fixture(c("base::findInterval(1, c(0, 2))", "findInterval(1, c(0, 2))",
+            "local_fn <- function(value = 1) value", "local_fn(1)"))
+    for (row in 0:1) {
+        col <- if (row == 0L) 19L else 13L
+        params <- readiness_params(fixture, row, col)
+        text_document_signature_help(fixture$server, row + 1L, params)
+        expect_match(tail(fixture$server$replies, 1L)[[1L]]$result$signatures[[1L]]$label, "findInterval(x, vec", fixed = TRUE)
+        params$position$character <- if (row == 0L) 12L else 5L
+        text_document_hover(fixture$server, row + 3L, params)
+        expect_match(tail(fixture$server$replies, 1L)[[1L]]$result$contents[[1L]], "findInterval", fixed = TRUE)
+        params$position$character <- col
+        text_document_completion(fixture$server, row + 5L, params)
+        items <- tail(fixture$server$replies, 1L)[[1L]]$result$items
+        expect_true("vec" %in% vapply(items, `[[`, "", "label"))
+    }
+    text_document_signature_help(fixture$server, 7L, readiness_params(fixture, 3L, 9L))
+    expect_match(tail(fixture$server$replies, 1L)[[1L]]$result$signatures[[1L]]$label, "local_fn(value", fixed = TRUE)
+    expect_length(fixture$server$replies, 7L)
+    expect_true(all(vapply(fixture$server$pending_replies$get(fixture$uri), function(queue) queue$size() == 0L, logical(1L))))
+})
+
+test_that("basic providers remain available through partially accepted discovery transfers", {
+    values <- list(index_mode = "full", index_persistent_cache = FALSE,
+        index_batch_size = 20L, index_time_budget_ms = Inf)
+    old <- stats::setNames(lapply(names(values), lsp_settings$get), names(values))
+    withr::defer(for (name in names(old)) lsp_settings$set(name, old[[name]]))
+    for (name in names(values)) lsp_settings$set(name, values[[name]])
+    fixture <- readiness_fixture(c("print(1)", "pri"))
+    fixture$workspace$s3_metadata <- S3MetadataCache$new()
+    paths <- file.path(fixture$workspace$root, sprintf("unrelated-%03d.R", seq_len(80L)))
+    for (path in paths) writeLines("unrelated <- function(value) value", path)
+    manager <- readiness_task_manager()
+    index <- fixture$workspace$index
+    index$attach_worker(manager)
+    request <- function() {
+        fixture$server$replies <- list()
+        text_document_completion(fixture$server, 1L, readiness_params(fixture, 1L, 3L))
+        text_document_signature_help(fixture$server, 2L, readiness_params(fixture, 0L, 6L))
+        text_document_hover(fixture$server, 3L, readiness_params(fixture, 0L, 2L))
+        expect_length(fixture$server$replies, 3L)
+        replies <- stats::setNames(fixture$server$replies,
+            vapply(fixture$server$replies, function(reply) as.character(reply$id), character(1L)))
+        expect_true("print" %in% vapply(replies$`1`$result$items, `[[`, character(1L), "label"))
+        expect_match(replies$`2`$result$signatures[[1L]]$label, "print(x", fixed = TRUE)
+        expect_match(replies$`3`$result$contents[[1L]], "print", fixed = TRUE)
+        expect_true(all(vapply(fixture$server$pending_replies$get(fixture$uri),
+                    function(queue) queue$size() == 0L, logical(1L))))
+    }
+    request()
+    index$discover()
+    index$process_batch()
+    request()
+    task <- tail(manager$tasks$values(), 1L)[[1L]]$.__enclos_env__$private
+    withr::defer(index_worker_release(task$args$key))
+    result <- do.call(index_worker_discover, task$args)
+    expect_gt(length(result$files), 20L)
+    task$callback(result)
+    request()
+    index$process_batch()
+    expect_true(index$discovering)
+    expect_lt(index$files$size(), length(result$files))
+    request()
+    for (i in seq_len(4L)) index$process_batch()
+    expect_false(index$discovering)
+    expect_false(index$complete())
+    request()
+})
+
+test_that("queued ordinary requests drain independently of S3 metadata waits", {
+    fixture <- readiness_fixture(c("base::findInterval(1, c(0, 2))", "pending::new_generic(1)"))
+    server <- fixture$server
+    queues <- server$pending_replies$get(fixture$uri)
+    queues$`textDocument/signatureHelp`$push(list(id = 1L, version = 1L,
+            params = readiness_params(fixture, 0L, 19L)))
+    queues$`textDocument/hover`$push(list(id = 2L, version = 1L,
+            params = readiness_params(fixture, 1L, 12L)))
+    expect_true(s3_metadata_waiting(server, fixture$uri, fixture$document, list(row = 1L, col = 12L), hover = TRUE))
+    result <- drain_pending_replies(server, fixture$uri, 1L)
+    expect_identical(result$processed, 1L)
+    expect_identical(queues$`textDocument/signatureHelp`$size(), 0L)
+    expect_identical(queues$`textDocument/hover`$size(), 1L)
+    expect_length(server$replies, 1L)
+    server$resolve_task_manager$has <- function(...) FALSE
+    result <- drain_pending_replies(server, fixture$uri, 1L)
+    expect_identical(result$processed, 1L)
+    expect_length(server$replies, 2L)
+})
+
+test_that("queued requests inside special syntax do not wait for S3 metadata", {
+    cases <- c(
+        "sample_result <- dt[, lapply(.SD, function(<cursor>))]",
+        "lapply(.SD, function(<cursor>) NULL)",
+        "if (<cursor>TRUE) NULL",
+        "for (<cursor>x in 1:2) NULL",
+        "while (<cursor>TRUE) NULL"
+    )
+    for (marked in cases) {
+        col <- regexpr("<cursor>", marked, fixed = TRUE)[[1L]] - 1L
+        fixture <- readiness_fixture(sub("<cursor>", "", marked, fixed = TRUE))
+        point <- list(row = 0L, col = col)
+        expect_null(s3_call_location(fixture$document, point), info = marked)
+        expect_false(s3_metadata_waiting(fixture$server, fixture$uri, fixture$document, point), info = marked)
+
+        queues <- fixture$server$pending_replies$get(fixture$uri)
+        for (i in seq_along(queues)) {
+            queues[[i]]$push(list(id = i, version = 1L, params = readiness_params(fixture, 0L, col)))
+        }
+        expect_identical(drain_pending_replies(fixture$server, fixture$uri, 1L)$processed, 3L, info = marked)
+        expect_length(fixture$server$replies, 3L)
+        expect_true(all(vapply(fixture$server$replies, function(reply) is.null(reply$error), logical(1L))), info = marked)
+    }
+    fixture <- readiness_fixture("sample_result <- dt[, lapply(.SD, function() NULL)]")
+    point <- list(row = 0L, col = nchar("sample_result <- dt[, lapply(.SD, funct"))
+    expect_null(s3_call_location(fixture$document, point, hover = TRUE))
+    expect_false(s3_metadata_waiting(fixture$server, fixture$uri, fixture$document, point, hover = TRUE))
+    point$col <- nchar("sample_result <- dt[, lapply(")
+    expect_identical(s3_call_location(fixture$document, point)$call$token, "lapply")
+})
+
+test_that("queued readiness errors return an error and do not block later requests", {
+    fixture <- readiness_fixture("print()")
+    server <- fixture$server
+    queues <- server$pending_replies$get(fixture$uri)
+    completion <- queues$`textDocument/completion`
+    completion$push(list(id = 1L, version = 1L, params = readiness_params(fixture, 0L, 1L)))
+    completion$push(list(id = 2L, version = 1L, params = readiness_params(fixture, 0L, 2L)))
+    server$request_handlers$`textDocument/completion` <- function(self, id, params) {
+        self$deliver(Response$new(id, result = "ok"))
+    }
+    testthat::local_mocked_bindings(
+        index_context_waiting = function(...) FALSE,
+        member_metadata_waiting = function(...) FALSE,
+        s3_metadata_waiting = function(self, uri, document, point, ...) {
+            if (point$col == 1L) stop("readiness failed")
+            FALSE
+        }, .package = "languageserver")
+
+    result <- drain_pending_replies(server, fixture$uri, 1L, max_replies = 1L)
+    expect_identical(result$processed, 1L)
+    expect_true(result$ready)
+    expect_identical(server$replies[[1L]]$id, 1L)
+    expect_identical(server$replies[[1L]]$error$code, -32603)
+    expect_match(server$replies[[1L]]$error$message, "readiness failed", fixed = TRUE)
+    expect_identical(completion$size(), 1L)
+    expect_identical(drain_pending_replies(server, fixture$uri, 1L)$processed, 1L)
+    expect_identical(server$replies[[2L]]$id, 2L)
+    expect_identical(server$replies[[2L]]$result, "ok")
+    expect_identical(completion$size(), 0L)
+})
+
+test_that("queued signatures use the enclosing call while S3 metadata is pending", {
+    fixture <- readiness_fixture(c('masking::new_generic(data.frame(x = 1), r"(first',
+        'base::findInterval(1)")'))
+    fixture$document$requested_packages <- list(packages = character(), namespace_packages = c("base", "masking"))
+    server <- fixture$server
+    col <- nchar("base::findInterval(1")
+    text_document_signature_help(server, 1L, readiness_params(fixture, 1L, col))
+    queue <- server$pending_replies$get(fixture$uri)$`textDocument/signatureHelp`
+    expect_length(server$replies, 0L)
+    expect_identical(queue$size(), 1L)
+    for (i in seq_len(3L)) {
+        result <- drain_pending_replies(server, fixture$uri, 1L, max_replies = 3L)
+        expect_identical(result$processed, 0L)
+        expect_false(result$ready)
+        expect_identical(queue$size(), 1L)
+        expect_identical(queue$peek()$id, 1L)
+        expect_length(server$replies, 0L)
+    }
+    catalog <- readiness_masking_catalog()
+    catalog$callables <- "new_generic"
+    generic <- catalog$functions$findInterval
+    generic$name <- generic$generic$name <- "new_generic"
+    catalog$functions <- list(new_generic = generic)
+    method <- catalog$methods[[1L]]
+    method$name <- "new_generic.data.frame"
+    method$generic <- "new_generic"
+    catalog$methods <- list("masking::new_generic.data.frame" = method)
+    fixture$workspace$s3_metadata$set("masking", catalog)
+    result <- drain_pending_replies(server, fixture$uri, 1L)
+    expect_identical(result$processed, 1L)
+    expect_identical(queue$size(), 0L)
+    expect_length(server$replies, 1L)
+    expect_match(server$replies[[1L]]$result$signatures[[1L]]$label, "columns = NULL", fixed = TRUE)
+})
+
+test_that("unknown package generics still wait for their first catalog", {
+    fixture <- readiness_fixture(c("new_generic(1)", "pending::new_generic(1)",
+            "f <- function() base::findInterval(1, c(0, 2))"))
+    expect_true(s3_metadata_waiting(fixture$server, fixture$uri, fixture$document, list(row = 0L, col = 12L)))
+    expect_true(s3_metadata_waiting(fixture$server, fixture$uri, fixture$document, list(row = 1L, col = 21L)))
+    location <- s3_call_location(fixture$document, list(row = 2L, col = 35L))
+    expect_false(s3_may_dispatch(fixture$workspace, fixture$document, location))
+    fixture$workspace$s3_metadata$set("pending", list(schema = 1L, generation = "ready",
+            functions = list(), objects = list(), methods = list(), dependencies = character()))
+    expect_false(s3_metadata_waiting(fixture$server, fixture$uri, fixture$document, list(row = 0L, col = 12L)))
+})
+
+test_that("ordinary calls inside functions remain responsive without bypassing shadowed calls", {
+    fixture <- readiness_fixture(c("f <- function() {", "  findInterval(1, c(0, 2))", "}"))
+    params <- readiness_params(fixture, 1L, 15L)
+    expect_false(s3_metadata_waiting(fixture$server, fixture$uri, fixture$document, list(row = 1L, col = 15L)))
+    text_document_signature_help(fixture$server, 1L, params)
+    expect_match(fixture$server$replies[[1L]]$result$signatures[[1L]]$label, "findInterval", fixed = TRUE)
+
+    shadowed <- readiness_fixture("f <- function(findInterval) findInterval(1)")
+    expect_true(s3_metadata_waiting(shadowed$server, shadowed$uri, shadowed$document, list(row = 0L, col = 41L)))
+    aliased <- readiness_fixture(c("f <- function() {", "  findInterval <- base::summary", "  findInterval(1)", "}"))
+    expect_true(s3_metadata_waiting(aliased$server, aliased$uri, aliased$document, list(row = 2L, col = 15L)))
+    quoted <- readiness_fixture("f <- function(`findInterval`) findInterval(1)")
+    expect_true(s3_metadata_waiting(quoted$server, quoted$uri, quoted$document, list(row = 0L, col = 43L)))
+    quoted_alias <- readiness_fixture(c("f <- function() {", "  `findInterval` <- base::summary", "  findInterval(1)", "}"))
+    expect_true(s3_metadata_waiting(quoted_alias$server, quoted_alias$uri, quoted_alias$document, list(row = 2L, col = 15L)))
+})
+
+test_that("pending attached packages can mask ordinary functions with S3 generics", {
+    fixture <- readiness_fixture(c("library(masking)", "findInterval(data.frame(x = 1), )",
+            "base::findInterval(1, c(0, 2))"))
+    fixture$document$requested_packages <- list(packages = "masking", namespace_packages = "base")
+    server <- fixture$server
+    params <- readiness_params(fixture, 1L, nchar(fixture$document$line0(1L)) - 1L)
+    text_document_signature_help(server, 1L, params)
+    hover_params <- readiness_params(fixture, 1L, 5L)
+    text_document_hover(server, 2L, hover_params)
+    text_document_completion(server, 3L, params)
+    text_document_signature_help(server, 4L, readiness_params(fixture, 2L, 19L))
+    expect_length(server$replies, 1L)
+    queues <- server$pending_replies$get(fixture$uri)
+    expect_true(all(vapply(queues, function(queue) queue$size() == 1L, logical(1L))))
+    fixture$workspace$s3_metadata$set("masking", list(schema = 1L, package = "masking", generation = "failed",
+            functions = list(), callables = character(), methods = list(), objects = list(), error = "Previous resolution failed"))
+    expect_identical(drain_pending_replies(server, fixture$uri, 1L)$processed, 0L)
+
+    fixture$workspace$s3_metadata$set("masking", readiness_masking_catalog())
+    expect_identical(drain_pending_replies(server, fixture$uri, 1L)$processed, 3L)
+    replies <- stats::setNames(server$replies, vapply(server$replies, function(reply) as.character(reply$id), ""))
+    expect_match(replies$`1`$result$signatures[[1L]]$label, "columns = NULL", fixed = TRUE)
+    expect_match(paste(replies$`2`$result$contents, collapse = " "), "findInterval.data.frame", fixed = TRUE)
+    expect_true("columns" %in% vapply(replies$`3`$result$items, `[[`, "", "label"))
+    expect_match(replies$`4`$result$signatures[[1L]]$label, "vec", fixed = TRUE)
+})
+
+test_that("namespace-only and later package requests do not mask an earlier ordinary call", {
+    fixture <- readiness_fixture("findInterval(1, c(0, 2))")
+    fixture$document$requested_packages <- list(packages = character(), namespace_packages = c("base", "masking"))
+    params <- readiness_params(fixture, 0L, 13L)
+    text_document_signature_help(fixture$server, 1L, params)
+    expect_match(fixture$server$replies[[1L]]$result$signatures[[1L]]$label, "vec", fixed = TRUE)
+    fixture$workspace$s3_metadata$set("masking", readiness_masking_catalog())
+    text_document_signature_help(fixture$server, 2L, params)
+    expect_match(fixture$server$replies[[2L]]$result$signatures[[1L]]$label, "vec", fixed = TRUE)
+
+    later <- readiness_fixture(c("findInterval(1, c(0, 2))", "library(masking)"))
+    later$document$requested_packages <- list(packages = "masking", namespace_packages = "base")
+    text_document_signature_help(later$server, 1L, readiness_params(later, 0L, 13L))
+    expect_match(later$server$replies[[1L]]$result$signatures[[1L]]$label, "vec", fixed = TRUE)
+})
+
+test_that("repeated unqualified calls avoid individual document and summary scans", {
+    fixture <- readiness_package_fixture()
+    workspace <- fixture$workspace
+    for (i in seq_len(1000L)) {
+        readiness_peer(fixture, paste0("peer", i), paste0("fn_", i, " <- function(x) x"), full = i <= 500L)
+    }
+    expect_identical(workspace$index$files$size(), 1001L)
+    counts <- new.env(parent = emptyenv())
+    counts$documents <- counts$summaries <- counts$keys <- 0L
+    get_document <- workspace$documents$get
+    get_summary <- workspace$index$summaries$get
+    get_keys <- workspace$documents$keys
+    withr::defer({
+        workspace$documents$get <- get_document
+        workspace$index$summaries$get <- get_summary
+        workspace$documents$keys <- get_keys
+    })
+    workspace$documents$get <- function(...) {
+        counts$documents <- counts$documents + 1L
+        get_document(...)
+    }
+    workspace$index$summaries$get <- function(...) {
+        counts$summaries <- counts$summaries + 1L
+        get_summary(...)
+    }
+    workspace$documents$keys <- function(...) {
+        counts$keys <- counts$keys + 1L
+        get_keys(...)
+    }
+    location <- s3_call_location(fixture$document, list(row = 0L, col = 13L))
+    expect_false(s3_may_dispatch(workspace, fixture$document, location))
+    expect_gt(counts$documents, 0L)
+    expect_gt(counts$summaries, 0L)
+    counts$documents <- counts$summaries <- counts$keys <- 0L
+    for (i in seq_len(10L)) expect_false(s3_may_dispatch(workspace, fixture$document, location))
+    expect_identical(counts$documents, 0L)
+    expect_identical(counts$summaries, 0L)
+    expect_identical(counts$keys, 0L)
+})
+
+test_that("cached peer imports follow edits, indexing and workspace membership", {
+    fixture <- readiness_package_fixture()
+    workspace <- fixture$workspace
+    peer <- readiness_peer(fixture, "peer", "library(masking)")
+    disk <- readiness_peer(fixture, "disk", "library(disk_package)", full = FALSE)
+    packages <- function() s3_call_packages(workspace, fixture$document, c(0L, 13L))
+    expect_true(all(c("masking", "disk_package") %in% packages()))
+
+    document <- workspace$documents$get(peer)
+    document$set_content(2L, "helper <- 1")
+    ReadinessSyncServer$new(workspace)$text_sync(peer, document)
+    expect_false("masking" %in% packages())
+    expect_true("disk_package" %in% packages())
+    document$set_content(3L, "library(changed_package)")
+    parsed <- parse_document(peer, document$content, include_xml = FALSE)
+    parsed$version <- document$version
+    workspace$update_parse_data(peer, parsed)
+    expect_true("changed_package" %in% packages())
+
+    workspace$index$update_content(disk, "library(updated_disk_package)")
+    expect_true("updated_disk_package" %in% packages())
+    expect_false("disk_package" %in% packages())
+
+    replacement <- Document$new(path_to_uri(file.path(workspace$root, "R", "replacement.R")), "r", 1L,
+        "library(replacement_package)")
+    parsed <- parse_document(replacement$uri, replacement$content, include_xml = FALSE)
+    parsed$version <- replacement$version
+    replacement$update_parse_data(parsed)
+    workspace$documents$remove(peer)
+    workspace$documents$set(replacement$uri, replacement)
+    workspace$update_loaded_packages()
+    expect_true("replacement_package" %in% packages())
+    # Unloaded package files remain visible through their disk summaries.
+    expect_true("changed_package" %in% packages())
+    workspace$index$remove(peer)
+    expect_false("changed_package" %in% packages())
+
+    workspace$imported_packages <- "imported_package"
+    expect_true("imported_package" %in% packages())
+    workspace$index <- WorkspaceIndex$new(workspace$root)
+    expect_false("updated_disk_package" %in% packages())
+    workspace$documents$remove(replacement$uri)
+    expect_false("replacement_package" %in% packages())
+})
+
+test_that("cached peer imports preserve cursor-specific masking in the current document", {
+    fixture <- readiness_package_fixture()
+    document <- fixture$document
+    document$set_content(2L, c("findInterval(1, c(0, 2))", "library(masking)", "findInterval(1, c(0, 2))"))
+    parsed <- parse_document(fixture$uri, document$content, include_xml = FALSE)
+    parsed$version <- document$version
+    fixture$workspace$update_parse_data(fixture$uri, parsed)
+    expect_false("masking" %in% s3_call_packages(fixture$workspace, document, c(0L, 13L)))
+    expect_true("masking" %in% s3_call_packages(fixture$workspace, document, c(2L, 13L)))
+    expect_false("masking" %in% s3_call_packages(fixture$workspace, document, c(0L, 13L)))
+})
+
+test_that("ordinary requests do not rescan the workspace definition catalog", {
+    fixture <- readiness_fixture("findInterval(1, c(0, 2))")
+    index <- fixture$workspace$index
+    values <- index$summaries$values
+    index$summaries$values <- function(...) stop("request scanned all workspace summaries")
+    withr::defer(index$summaries$values <- values)
+    for (i in seq_len(100L)) {
+        uri <- path_to_uri(file.path(fixture$workspace$root, paste0(i, ".R")))
+        index$set_summary(list(uri = uri, sources = character(),
+                definitions = list(shared = list(name = "shared"))))
+        text_document_signature_help(fixture$server, i, readiness_params(fixture, 0L, 13L))
+    }
+    expect_length(fixture$server$replies, 100L)
+    expect_true(index$has_definition("shared"))
+    index$remove(uri)
+    expect_true(index$has_definition("shared"))
+    for (i in seq_len(99L)) index$remove(path_to_uri(file.path(fixture$workspace$root, paste0(i, ".R"))))
+    expect_false(index$has_definition("shared"))
+})
+
+test_that("failed parse workers settle queued requests and allow a later parse", {
+    fixture <- readiness_fixture("base::findInterval(1, c(0, 2))")
+    server <- fixture$server
+    document <- fixture$document
+    document$set_content(2L, c(document$content, "new_value <- 1"))
+    queues <- server$pending_replies$get(fixture$uri)
+    queues$`textDocument/signatureHelp`$push(list(id = 1L, version = 2L,
+            params = readiness_params(fixture, 0L, 19L)))
+    queues$`textDocument/hover`$push(list(id = 2L, version = 1L, params = list()))
+    queues$`textDocument/completion`$push(list(id = 3L, version = 3L, params = list()))
+    task <- parse_task(server, fixture$uri, document, retry = FALSE)
+    task$.__enclos_env__$private$error(simpleError("worker exited"))
+    expect_length(server$replies, 2L)
+    expect_identical(server$replies[[1L]]$error$code, -32800)
+    expect_identical(server$replies[[2L]]$error$code, -32603)
+    expect_match(server$replies[[2L]]$error$message, "worker exited", fixed = TRUE)
+    expect_identical(queues$`textDocument/completion`$size(), 1L)
+    text_document_signature_help(server, 4L, readiness_params(fixture, 0L, 19L))
+    expect_identical(tail(server$replies, 1L)[[1L]]$error$code, -32603)
+
+    queues$`textDocument/completion`$pop()
+    document$set_content(3L, "base::findInterval(1, c(0, 2))")
+    task <- parse_task(server, fixture$uri, document, retry = FALSE)
+    parsed <- parse_document(fixture$uri, document$content, include_xml = FALSE)
+    task$.__enclos_env__$private$callback(parsed)
+    expect_null(document$parse_failure)
+    text_document_signature_help(server, 5L, readiness_params(fixture, 0L, 19L))
+    expect_match(tail(server$replies, 1L)[[1L]]$result$signatures[[1L]]$label, "findInterval", fixed = TRUE)
+})

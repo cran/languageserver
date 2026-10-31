@@ -19,7 +19,13 @@ symbol_range <- function(symbol) {
     symbol$range
 }
 
-language_client <- function(working_dir = getwd(), workspace_folders = NULL, diagnostics = FALSE, capabilities = NULL) {
+flatten_document_symbols <- function(symbols) {
+    unlist(lapply(symbols, function(symbol) {
+        c(list(symbol), flatten_document_symbols(symbol$children))
+    }), recursive = FALSE, use.names = FALSE)
+}
+
+language_client <- function(working_dir = getwd(), workspace_folders = NULL, diagnostics = FALSE, capabilities = NULL, lib_paths = NULL) {
 
     if (nzchar(Sys.getenv("R_LANGSVR_LOG"))) {
         script <- sprintf(
@@ -27,6 +33,13 @@ language_client <- function(working_dir = getwd(), workspace_folders = NULL, dia
             normalizePath(Sys.getenv("R_LANGSVR_LOG"), "/", mustWork = FALSE))
     } else {
         script <- "options(languageserver.formatting_style = NULL); languageserver::run()"
+    }
+    if (!is.null(lib_paths)) {
+        # Apply explicit test paths after inherited startup profiles, which
+        # can otherwise restore the check worker's original library paths.
+        # Retain the server's dependency paths rather than copying a worker's
+        # temporary proxy library into a standalone R process.
+        script <- paste0(".libPaths(c(", paste(deparse(lib_paths), collapse = "\n"), ", .libPaths())); ", script)
     }
 
     client <- LanguageClient$new(
@@ -43,7 +56,10 @@ language_client <- function(working_dir = getwd(), workspace_folders = NULL, dia
     client$start(working_dir = working_dir, workspace_folders = workspace_folders, capabilities = capabilities)
     client$catch_callback_error <- FALSE
     # initialize request
-    data <- client$fetch(blocking = TRUE)
+    data <- tryCatch(client$fetch(blocking = TRUE), error = function(e) {
+        stderr <- paste(client$process$read_error_lines(), collapse = "\n")
+        stop(paste(c(conditionMessage(e), stderr[nzchar(stderr)]), collapse = "\n"), call. = FALSE)
+    })
     client$handle_raw(data)
     client %>% notify("initialized")
     client %>% notify(
@@ -123,8 +139,9 @@ respond <- function(client, method, params, timeout, allow_error = FALSE,
     retry = TRUE, retry_when = function(result) length(result) == 0) {
     if (missing(timeout)) {
         if (Sys.getenv("R_COVR", "") == "true") {
-            # we give more time to covr
-            timeout <- 30
+            # Instrumented parse and metadata workers can exceed 30 seconds
+            # when several test processes start them on a shared runner.
+            timeout <- 60
         } else {
             timeout <- 10
         }
@@ -137,12 +154,21 @@ respond <- function(client, method, params, timeout, allow_error = FALSE,
         } else if (allow_error) {
             storage$done <- TRUE
             storage$result <- error
+        } else {
+            storage$done <- TRUE
+            storage$error <- error
+            fail(paste0("LSP request ", method, " failed: ", error$message))
         }
     }
 
     start_time <- Sys.time()
     remaining <- timeout
-    client$deliver(client$request(method, params), callback = cb)
+    request <- client$request(method, params)
+    id <- as.character(request$id)
+    on.exit({
+        if (client$request_callbacks$has(id)) client$request_callbacks$remove(id)
+    }, add = TRUE)
+    client$deliver(request, callback = cb)
     if (method == "shutdown") {
         # do not expect the server returns anything
         return(NULL)
@@ -157,6 +183,7 @@ respond <- function(client, method, params, timeout, allow_error = FALSE,
         remaining <- (start_time + timeout) - Sys.time()
     }
     result <- storage$result
+    if (!is.null(storage$error)) return(NULL)
     if (retry && retry_when(result)) {
         remaining <- (start_time + timeout) - Sys.time()
         if (remaining < 0) {
@@ -500,7 +527,12 @@ respond_semantic_tokens_range <- function(client, path, start_pos, end_pos, ...,
     )
 }
 
-wait_for <- function(client, method, timeout = 30) {
+wait_for <- function(client, method, timeout = 30, uri = NULL) {
+    if (missing(timeout) && identical(Sys.getenv("R_COVR"), "true")) {
+        # Diagnostics now wait for parsing. Coverage adds overhead to both
+        # workers, especially when several test processes start them together.
+        timeout <- 60
+    }
     storage <- new.env(parent = .GlobalEnv)
     start_time <- Sys.time()
     remaining <- timeout
@@ -510,7 +542,7 @@ wait_for <- function(client, method, timeout = 30) {
         client$notification_handlers[[method]] <- original_handler
     })
     client$notification_handlers[[method]] <- function(self, params) {
-        storage$params <- params
+        if (is.null(uri) || identical(params$uri, uri)) storage$params <- params
         original_handler(self, params)
     }
 

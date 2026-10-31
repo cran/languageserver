@@ -44,6 +44,35 @@ test_that("native string matching validates its low-level inputs", {
     )
 })
 
+test_that("matching wrappers handle missing candidates consistently across encodings", {
+    for (values in list(c("abc", NA_character_), c("abc", "\u00e9clair", NA_character_))) {
+        expect_identical(match_with(values, "a"), !is.na(values))
+        expect_identical(fuzzy_find(values, "a"), !is.na(values))
+        expect_identical(fuzzy_find(values, ""), !is.na(values))
+        expect_identical(fuzzy_find(values, NA_character_), rep(NA, length(values)))
+    }
+})
+
+test_that("Unicode fuzzy matching treats regex punctuation as literal characters", {
+    punctuation <- c("[", "]", ".", "*", "+", "(", ")", "?", "{", "}", "$", "^", "|", "\\")
+    for (mark in punctuation) {
+        pattern <- paste0("\u00e9", mark)
+        expect_identical(fuzzy_find(c(pattern, paste0("\u00e9gap", mark), "\u00e9plain", NA_character_), pattern),
+            c(TRUE, TRUE, FALSE, FALSE))
+    }
+    expect_identical(fuzzy_find(c("\u00e9\nvalue", "\u00e9value"), "\u00e9v"), c(TRUE, TRUE))
+})
+
+test_that("Unicode completion matching treats quoted punctuation literally", {
+    values <- c("[<-", "a\\b", "a.b", "a*b", "a+b", "a(b", "a?b", "a{b", "a$b",
+        paste0(intToUtf8(0xe9), "clair"), NA_character_)
+    for (i in seq_len(9L)) {
+        expect_identical(which(match_with(values, toupper(values[[i]]))), i)
+    }
+    expect_identical(match_with(values, ""), !is.na(values))
+    expect_identical(match_with(values, NA_character_), rep(NA, length(values)))
+})
+
 test_that("token scanning recognizes namespace and identifier boundaries", {
     expect_equal(
         scan_token("pkg::", 5L),
@@ -84,6 +113,53 @@ test_that("native token scanning validates scalar input types", {
         .Call("scan_token_c", "x", 0, TRUE, PACKAGE = "languageserver"),
         "col must be a single integer"
     )
+})
+
+test_that("Backtick completion scanning respects escapes and source offsets", {
+    scan <- function(text, col = nchar(text)) {
+        .Call("scan_backtick_completion_c", text, as.integer(col),
+            PACKAGE = "languageserver")
+    }
+    expect_identical(scan("pkg::`run"), list(token = "run", start = 5L, end = 9L))
+    expect_identical(scan("pkg::`run task`()", 9L),
+        list(token = "run", start = 5L, end = 15L))
+    expect_identical(scan("pkg::`run`", 10L),
+        list(token = "run", start = 5L, end = 10L))
+    expect_identical(scan("pkg::`"), list(token = "", start = 5L, end = 6L))
+    expect_identical(scan("`a\\`b`", 5L),
+        list(token = "a\\`b", start = 0L, end = 6L))
+    unicode <- paste0("\"", intToUtf8(0x1f680), "\"; pkg::`", intToUtf8(0xe9), " task`")
+    expect_identical(scan(unicode, 12L),
+        list(token = intToUtf8(0xe9), start = 10L, end = 18L))
+    for (text in c("plain", "`closed` + ", "# pkg::`run", '"pkg::`run',
+            "'pkg::`run", 'r"(pkg::`run)"', "'escaped\\' `run'")) {
+        expect_null(scan(text))
+    }
+    expect_error(.Call("scan_backtick_completion_c", c("x", "y"), 0L,
+            PACKAGE = "languageserver"), "line must be a single character string")
+    expect_error(.Call("scan_backtick_completion_c", "x", 0,
+            PACKAGE = "languageserver"), "col must be a single integer")
+})
+
+test_that("Closed-string scanning locates quoted names without confusing their contents", {
+    scan <- function(text, col = nchar(text)) {
+        .Call("scan_closed_string_completion_c", text, as.integer(col),
+            PACKAGE = "languageserver")
+    }
+    expect_identical(scan('x$"pos"'), list(token = "pos", start = 2L, end = 7L))
+    expect_identical(scan("x$'pos'"), list(token = "pos", start = 2L, end = 7L))
+    expect_null(scan('x$"pos"', 5L))
+    expect_identical(scan('x$"a\\\"pos"'), list(token = 'a\\"pos', start = 2L, end = 10L))
+    expect_identical(scan("x$'a\\'pos'"), list(token = "a\\'pos", start = 2L, end = 10L))
+    text <- paste0('"', intToUtf8(0x1f680), '"; x$"', intToUtf8(0xe9), '"')
+    expect_identical(scan(text), list(token = intToUtf8(0xe9), start = 7L, end = 10L))
+    for (text in c("plain", 'x$"closed" + ', '# x$"pos"', '`x$"pos"`')) {
+        expect_null(scan(text))
+    }
+    expect_error(.Call("scan_closed_string_completion_c", c("x", "y"), 0L,
+            PACKAGE = "languageserver"), "line must be a single character string")
+    expect_error(.Call("scan_closed_string_completion_c", "x", 0,
+            PACKAGE = "languageserver"), "col must be a single integer")
 })
 
 test_that("UTF-16 conversion handles every UTF-8 width and boundary", {
@@ -135,4 +211,39 @@ test_that("quote detection handles backticks and raw-string delimiters", {
     expect_false(enclosed("R'[raw]' + value", 12L))
     expect_false(enclosed("R\"[raw]\" + value", 12L))
     expect_false(enclosed("R'{raw}' + value", 12L))
+    expect_false(enclosed("1 %\"% 2 + value", 12L))
+    expect_true(enclosed("1 %#% \"quoted", 10L))
+
+    expect_error(
+        .Call("uncomment_lines_c", 1L, 0L, 0L, 0L, PACKAGE = "languageserver"),
+        "content must be a character vector"
+    )
+    expect_identical(
+        .Call("uncomment_lines_c", character(), 0L, 0L, 0L, PACKAGE = "languageserver"),
+        character()
+    )
+    expect_identical(
+        .Call("uncomment_lines_c", c(NA_character_, "x # c"), 0L, 1L, 0L, PACKAGE = "languageserver"),
+        c(NA_character_, "x ")
+    )
+    expect_identical(
+        .Call("uncomment_lines_c", c("prose \"unclosed", "x <- 1 %#% 2 # c"), 0L, 1L, 1L, PACKAGE = "languageserver"),
+        "x <- 1 %#% 2 "
+    )
+    expect_identical(
+        .Call("uncomment_lines_c", "x <- 1 %\"% 2 # c", 0L, 0L, 0L, PACKAGE = "languageserver"),
+        "x <- 1 %\"% 2 "
+    )
+    expect_error(
+        .Call("missing_closing_delimiters_c", 1L, PACKAGE = "languageserver"),
+        "content must be a character vector"
+    )
+    expect_identical(
+        .Call("missing_closing_delimiters_c", c(NA_character_, "f({["), PACKAGE = "languageserver"),
+        "]})"
+    )
+    expect_identical(
+        .Call("missing_closing_delimiters_c", "f(1 %#% 2, 1 %\"% 2, 1 %(% 2", PACKAGE = "languageserver"),
+        ")"
+    )
 })

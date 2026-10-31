@@ -5,9 +5,14 @@ Task <- R6::R6Class("Task",
         session = NULL,
         target = NULL,
         args = NULL,
+        profiles = TRUE,
         callback = NULL,
         error = NULL,
         cancelled = FALSE,
+        completed = FALSE,
+        track_descendants = FALSE,
+        descendants = NULL,
+        descendant_check_time = -Inf,
         invoke_handler = function(handler, value, type) {
             if (private$cancelled || is.null(handler)) return(invisible(NULL))
             tryCatch(
@@ -25,12 +30,18 @@ Task <- R6::R6Class("Task",
     public = list(
         time = NULL,
         delay = NULL,
-        initialize = function(target, args, callback = NULL, error = NULL, delay = 0) {
+        started_at = NULL,
+        initialize = function(target, args, callback = NULL, error = NULL, delay = 0,
+            profiles = TRUE, track_descendants = FALSE) {
             private$target <- target
             private$args <- args
+            private$profiles <- profiles
+            private$track_descendants <- isTRUE(track_descendants)
+            private$descendants <- list()
             private$callback <- callback
             private$error <- error
             self$time <- Sys.time()
+            self$started_at <- proc.time()[[3L]]
             if (!is.numeric(delay) || length(delay) != 1L ||
                     is.na(delay) || delay < 0) {
                 delay <- 0
@@ -42,7 +53,7 @@ Task <- R6::R6Class("Task",
                 private$process <- callr::r_bg(
                     private$target,
                     private$args,
-                    system_profile = TRUE, user_profile = TRUE
+                    system_profile = private$profiles, user_profile = private$profiles
                 )
             } else {
                 private$session <- session
@@ -53,14 +64,35 @@ Task <- R6::R6Class("Task",
             }
         },
         check = function() {
+            if (private$completed) return(TRUE)
+            # callr can retain a buffered logical state after its native worker
+            # has exited. Clean observed children before reading that buffer.
+            if (private$track_descendants && !is.null(private$session) &&
+                    is.function(private$session$is_alive) && !isTRUE(private$session$is_alive())) {
+                task_kill_descendants(private$session, private$descendants)
+                private$completed <- TRUE
+                private$invoke_handler(private$error, simpleError("Session finished unexpectedly while task was running"), "error")
+                return(TRUE)
+            }
+            if (private$track_descendants && proc.time()[[3L]] - private$descendant_check_time >= 0.05) {
+                process <- if (!is.null(private$session)) private$session else private$process
+                private$descendants <- task_process_descendants(process, private$descendants)
+                private$descendant_check_time <- proc.time()[[3L]]
+            }
             if (!is.null(private$session)) {
                 res <- private$session$read()
                 if (!is.null(res)) {
                     if (isTRUE(res$code == 200) && is.null(res$error)) {
+                        private$completed <- TRUE
                         private$invoke_handler(
                             private$callback, res$result, "completion")
                         return(TRUE)
                     } else if (!is.null(res$code)) {
+                        if (private$track_descendants) task_kill_observed_children(private$descendants)
+                        if (identical(private$session$get_state(), "finished")) {
+                            task_kill_descendants(private$session, private$descendants)
+                        }
+                        private$completed <- TRUE
                         err <- res$error
                         if (is.null(err)) err <- simpleError(paste("Session error with code", res$code))
                         private$invoke_handler(private$error, err, "error")
@@ -69,6 +101,8 @@ Task <- R6::R6Class("Task",
                 }
                 state <- private$session$get_state()
                 if (identical(state, "finished")) {
+                    task_kill_descendants(private$session, private$descendants)
+                    private$completed <- TRUE
                     err <- simpleError("Session finished unexpectedly while task was running")
                     private$invoke_handler(private$error, err, "error")
                     return(TRUE)
@@ -83,6 +117,8 @@ Task <- R6::R6Class("Task",
             } else {
                 # r_bg$get_result() will throw
                 result <- tryCatch(private$process$get_result(), error = function(e) e)
+                if (inherits(result, "error")) task_kill_descendants(private$process, private$descendants)
+                private$completed <- TRUE
 
                 if (inherits(result, "error")) {
                     private$invoke_handler(private$error, result, "error")
@@ -102,6 +138,10 @@ Task <- R6::R6Class("Task",
         },
         kill = function() {
             private$cancelled <- TRUE
+            # A completion callback may queue another task on this session.
+            # Finishing the old task must neither kill that worker nor read
+            # the successor's response when the old task is reaped.
+            if (private$completed) return(invisible(NULL))
             retired_session <- NULL
             if (!is.null(private$session)) {
                 if (!identical(Sys.getenv("R_COVR"), "true")) {
@@ -109,6 +149,7 @@ Task <- R6::R6Class("Task",
                     # interrupt the next task on the persistent session. Retire
                     # the worker instead so cancellation cannot leak across tasks.
                     retired_session <- private$session
+                    task_kill_descendants(private$session, private$descendants)
                     tryCatch(
                         private$session$kill(
                             grace = 0, close_connections = FALSE),
@@ -119,6 +160,7 @@ Task <- R6::R6Class("Task",
                 if (identical(Sys.getenv("R_COVR"), "true")) {
                     private$process$wait()
                 } else {
+                    task_kill_descendants(private$process, private$descendants)
                     private$process$kill()
                 }
             }
@@ -141,7 +183,35 @@ TaskManager <- R6::R6Class("TaskManager",
         cancelled_tasks = NULL,
         cancellation_grace = 0,
         superseded_tasks = NULL,
+        promoted_tasks = NULL,
+        pending_schedule = NULL,
+        session_init = NULL,
         stopping = FALSE,
+        schedule = function() {
+            # Queue mutations and the next debounce deadline invalidate this
+            # snapshot. Worker polling alone must not rescan every pending URI.
+            now <- proc.time()[[3L]]
+            cached <- private$pending_schedule
+            if (!is.null(cached) && now < cached$deadline) return(cached)
+
+            ids <- private$pending_tasks$keys()
+            deadlines <- vapply(ids, function(id) {
+                if (private$running_tasks$has(id)) return(Inf)
+                task <- private$pending_tasks$get(id)
+                task$started_at + task$delay
+            }, numeric(1L))
+            ready <- ids[deadlines <= now]
+            if (isTRUE(private$process_recent_first)) ready <- rev(ready)
+            if (private$promoted_tasks$size()) {
+                promoted <- intersect(rev(private$promoted_tasks$keys()), ready)
+                ready <- c(promoted, setdiff(ready, promoted))
+            }
+            private$pending_schedule <- list(
+                ids = ready,
+                deadline = min(c(Inf, deadlines[deadlines > now]))
+            )
+            private$pending_schedule
+        },
         log_error = function(...) {
             tryCatch(logger$error(...), error = function(e) NULL)
             invisible(NULL)
@@ -154,6 +224,7 @@ TaskManager <- R6::R6Class("TaskManager",
         retire_session = function(session) {
             private$remove_session(session)
             if (!identical(Sys.getenv("R_COVR"), "true")) {
+                task_kill_descendants(session)
                 tryCatch(
                     session$kill(grace = 0),
                     error = function(e) private$log_error(
@@ -165,7 +236,8 @@ TaskManager <- R6::R6Class("TaskManager",
             session <- callr::r_session$new(
                 options = callr::r_session_options(
                     system_profile = TRUE,
-                    user_profile = TRUE
+                    user_profile = TRUE,
+                    load_hook = private$session_init
                 ),
                 # Starting R can take hundreds of milliseconds. Never wait
                 # for it on the language-server event loop.
@@ -203,11 +275,12 @@ TaskManager <- R6::R6Class("TaskManager",
             }
             invisible(NULL)
         },
-        find_available_session = function() {
+        available_sessions = function() {
             if (!isTRUE(private$use_session)) {
-                return(NULL)
+                return(list())
             }
 
+            available <- list()
             for (s in private$sessions) {
                 state <- tryCatch(
                     {
@@ -229,10 +302,10 @@ TaskManager <- R6::R6Class("TaskManager",
                     next
                 }
                 if (state == "idle") {
-                    return(s)
+                    available[[length(available) + 1L]] <- s
                 }
             }
-            NULL
+            available
         },
         prune_sessions = function() {
             for (i in rev(seq_along(private$sessions))) {
@@ -245,15 +318,14 @@ TaskManager <- R6::R6Class("TaskManager",
                     next
                 }
                 if (state == "finished") {
+                    task_kill_descendants(session)
                     private$sessions[[i]] <- NULL
                 } else if (state == "idle") {
                     idle_start <- attr(session, "idle_start")
                     if (is.null(idle_start)) {
-                        attr(session, "idle_start") <- Sys.time()
+                        attr(session, "idle_start") <- proc.time()[[3L]]
                     } else if (length(private$sessions) > private$min_idle_sessions &&
-                        as.numeric(difftime(
-                            Sys.time(), idle_start,
-                            units = "secs")) > private$session_idle_timeout) {
+                            proc.time()[[3L]] - idle_start > private$session_idle_timeout) {
                         close_error <- tryCatch(
                             {
                                 if (identical(Sys.getenv("R_COVR"), "true")) {
@@ -286,7 +358,7 @@ TaskManager <- R6::R6Class("TaskManager",
         initialize = function(name, use_session = FALSE,
             process_recent_first = FALSE, cpu_load = 0.5,
             max_running_tasks = 8, session_idle_timeout = 300,
-            min_idle_sessions = 1, cancellation_grace = 0) {
+            min_idle_sessions = 1, cancellation_grace = 0, session_init = NULL) {
             private$pending_tasks <- collections::ordered_dict()
             private$running_tasks <- collections::ordered_dict()
             private$name <- name
@@ -294,6 +366,8 @@ TaskManager <- R6::R6Class("TaskManager",
             private$process_recent_first <- process_recent_first
             private$cancelled_tasks <- list()
             private$superseded_tasks <- collections::dict()
+            private$promoted_tasks <- collections::ordered_dict()
+            private$session_init <- session_init
             private$cancellation_grace <- if (is.numeric(cancellation_grace) &&
                     length(cancellation_grace) == 1L &&
                     is.finite(cancellation_grace) && cancellation_grace > 0) {
@@ -320,15 +394,31 @@ TaskManager <- R6::R6Class("TaskManager",
             }
         },
         add_task = function(id, task) {
-            if (is.null(task) || private$stopping) {
+            if (private$stopping) {
                 return(NULL)
             }
             # Replacing an ordered-dict value does not update insertion order.
             # Remove it first so process_recent_first reflects actual recency.
+            # NULL means the replacement was satisfied synchronously (a cache
+            # hit or an empty request), so obsolete work must still be cancelled.
             self$cancel(id)
-            private$pending_tasks$set(id, task)
+            if (!is.null(task)) private$pending_tasks$set(id, task)
+        },
+        has = function(id) private$pending_tasks$has(id) || private$running_tasks$has(id),
+        promote = function(id) {
+            if (private$pending_tasks$has(id)) {
+                task <- private$pending_tasks$get(id)
+                task$delay <- 0
+                if (!private$promoted_tasks$has(id)) {
+                    private$promoted_tasks$set(id, TRUE)
+                }
+                private$pending_schedule <- NULL
+            }
+            invisible(NULL)
         },
         cancel = function(id) {
+            private$pending_schedule <- NULL
+            private$promoted_tasks$pop(id, NULL)
             if (private$pending_tasks$has(id)) {
                 private$pending_tasks$remove(id)
             }
@@ -362,27 +452,11 @@ TaskManager <- R6::R6Class("TaskManager",
             n <- max(private$max_running_tasks - private$running_tasks$size(), 0)
             if (n == 0L) return(invisible(NULL))
 
-            pending_ids <- private$pending_tasks$keys()
+            pending_ids <- private$schedule()$ids
             if (!length(pending_ids)) return(invisible(NULL))
 
-            eligible <- vapply(pending_ids, function(id) {
-                if (private$running_tasks$has(id)) return(FALSE)
-                task <- private$pending_tasks$get(id)
-                as.numeric(difftime(
-                    Sys.time(), task$time, units = "secs")) >= task$delay
-            }, logical(1L))
-            pending_ids <- pending_ids[eligible]
-            if (!length(pending_ids)) return(invisible(NULL))
-
-            # Performance: Prioritize newer tasks over older for better responsiveness
-            # For parse tasks, process most recent documents first
-            if (length(pending_ids) > n && isTRUE(private$process_recent_first)) {
-                # Take the most recent n tasks and dispatch newest first.
-                pending_ids <- rev(tail(pending_ids, n))
-            } else if (length(pending_ids) > n) {
+            if (length(pending_ids) > n) {
                 pending_ids <- pending_ids[seq_len(n)]
-            } else if (isTRUE(private$process_recent_first)) {
-                pending_ids <- rev(pending_ids)
             }
 
             if (isTRUE(private$use_session)) {
@@ -390,20 +464,23 @@ TaskManager <- R6::R6Class("TaskManager",
                 # independent tasks to start workers in parallel without
                 # growing the pool for a single pending task.
                 private$ensure_demand_sessions(length(pending_ids))
+                sessions <- private$available_sessions()
+                pending_ids <- utils::head(pending_ids, length(sessions))
             }
 
-            for (id in pending_ids) {
-                task <- private$pending_tasks$get(id)
-                session <- NULL
-
-                if (isTRUE(private$use_session)) {
-                    session <- private$find_available_session()
-                    if (is.null(session)) {
-                        next
-                    }
-                }
+            selected_tasks <- lapply(pending_ids, private$pending_tasks$get)
+            for (i in seq_along(pending_ids)) {
+                if (private$stopping) break
+                id <- pending_ids[[i]]
+                if (!identical(private$pending_tasks$get(id, NULL), selected_tasks[[i]])) next
+                session <- if (isTRUE(private$use_session)) sessions[[i]] else NULL
+                # A fast task can finish between polls. Reset the idle clock
+                # at dispatch even when prune_sessions never observes "busy".
+                if (!is.null(session)) attr(session, "idle_start") <- NULL
 
                 task <- private$pending_tasks$pop(id)
+                private$promoted_tasks$pop(id, NULL)
+                private$pending_schedule <- NULL
                 private$running_tasks$set(id, task)
                 start_error <- tryCatch(
                     {
@@ -418,6 +495,9 @@ TaskManager <- R6::R6Class("TaskManager",
                         private$retire_session(session)
                     }
                     task$fail(start_error)
+                    # Error callbacks can stop the manager, replace queued
+                    # tasks, or dispatch new work. Recompute the batch next time.
+                    break
                 }
             }
         },
@@ -425,9 +505,10 @@ TaskManager <- R6::R6Class("TaskManager",
             running_tasks <- private$running_tasks
             keys <- private$running_tasks$keys()
             for (key in keys) {
-                task <- running_tasks$get(key)
+                task <- running_tasks$get(key, NULL)
+                if (is.null(task)) next
                 check_result <- tryCatch(task$check(), error = function(e) e)
-                if (identical(check_result, FALSE) &&
+                if (isFALSE(check_result) &&
                         private$superseded_tasks$has(key) &&
                         proc.time()[[3L]] >= private$superseded_tasks$get(key)) {
                     retired_session <- task$kill()
@@ -460,9 +541,14 @@ TaskManager <- R6::R6Class("TaskManager",
                 if (isTRUE(check_result)) {
                     # FIXME: debug
                     logger$info(private$name, "task timing:", Sys.time() - task$time, " ", key)
-                    running_tasks$remove(key)
-                    if (private$superseded_tasks$has(key)) {
-                        private$superseded_tasks$remove(key)
+                    # The callback may have cancelled this entry or started a
+                    # different task with the same id. Only remove our own entry.
+                    if (identical(running_tasks$get(key, NULL), task)) {
+                        running_tasks$remove(key)
+                        private$pending_schedule <- NULL
+                        if (private$superseded_tasks$has(key)) {
+                            private$superseded_tasks$remove(key)
+                        }
                     }
                 }
             }
@@ -489,6 +575,20 @@ TaskManager <- R6::R6Class("TaskManager",
                 private$prune_sessions()
             }
         },
+        wait_timeout = function(max_timeout = 0.01) {
+            if (private$stopping ||
+                    private$running_tasks$size() >= private$max_running_tasks) return(max_timeout)
+            schedule <- private$schedule()
+            if (length(schedule$ids)) {
+                available <- !isTRUE(private$use_session) || any(vapply(private$sessions, function(session) {
+                    identical(tryCatch(session$get_state(), error = function(e) NULL), "idle")
+                }, logical(1L)))
+                if (available) return(0)
+            }
+            # Running/starting workers are polled at the existing ceiling;
+            # input readiness may wake the server earlier without busy waits.
+            min(max_timeout, max(schedule$deadline - proc.time()[[3L]], 0))
+        },
         has_work = function() {
             private$pending_tasks$size() > 0L ||
                 private$running_tasks$size() > 0L
@@ -497,6 +597,8 @@ TaskManager <- R6::R6Class("TaskManager",
             if (private$stopping) return(invisible(NULL))
             private$stopping <- TRUE
             private$pending_tasks$clear()
+            private$promoted_tasks$clear()
+            private$pending_schedule <- NULL
             for (id in private$running_tasks$keys()) {
                 task <- private$running_tasks$get(id)
                 tryCatch(
@@ -552,12 +654,43 @@ package_call <- function(target) {
     ), envir = baseenv())
 }
 
-create_task <- function(target, args, callback = NULL, error = NULL, delay = 0) {
+create_task <- function(target, args, callback = NULL, error = NULL, delay = 0,
+    profiles = TRUE, track_descendants = FALSE) {
     Task$new(
         target = target,
         args = args,
         callback = callback,
         error = error,
-        delay = delay
+        delay = delay,
+        profiles = profiles, track_descendants = track_descendants
     )
+}
+
+# Kill descendants while the worker still exists, so process ancestry is intact.
+task_process_descendants <- function(process, previous = list()) {
+    if (is.function(process$get_pid) && ps::ps_is_supported()) {
+        children <- tryCatch(ps::ps_children(ps::ps_handle(process$get_pid()), recursive = TRUE),
+            error = function(e) list())
+        handles <- c(previous, children)
+        if (length(handles)) {
+            identities <- vapply(handles, function(handle) paste(ps::ps_pid(handle), ps::ps_create_time(handle)), character(1L))
+            return(handles[!duplicated(identities)])
+        }
+    }
+    previous
+}
+
+task_kill_descendants <- function(process, previous = list()) {
+    # Environment-marker lookup alone can miss a descendant between fork and
+    # exec. Also walk live PID ancestry before retiring the worker.
+    children <- task_process_descendants(process, previous)
+    task_kill_observed_children(children)
+    if (is.function(process$kill_tree)) tryCatch(
+        process$kill_tree(grace = 0, close_connections = FALSE), error = function(e) NULL)
+    invisible(NULL)
+}
+
+task_kill_observed_children <- function(children) {
+    for (child in rev(children)) tryCatch(ps::ps_kill(child), error = function(e) NULL)
+    invisible(NULL)
 }

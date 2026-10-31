@@ -22,6 +22,55 @@ test_that("Document changes handle whole files and multiline replacements", {
     expect_identical(normalize_parse_content(character()), "")
 })
 
+test_that("Parser collectors preserve replacement values and first-seen order", {
+    content <- c(
+        "{",
+        "  #' Original function",
+        "  first <- function(x = 1) x",
+        "  second <- TRUE",
+        "  #' Replacement function",
+        "  first <- function(y = 2) y",
+        "  first <- 3",
+        "  for (second in 1:2) { third <- second }",
+        "  for (loop in 1:2) { third <- loop }",
+        "  for (loop in 1:2) {}",
+        "  assign('fourth', function(z) z)",
+        "  delayedAssign('fifth', 5)",
+        "  makeActiveBinding('active', function() 1, .GlobalEnv)",
+        "  ignored <- function() { hidden <- 1 }",
+        "}"
+    )
+    parsed <- parse_document("file:///collector-order.R", content)
+    expect_identical(names(parsed$definitions),
+        c("first", "second", "third", "fourth", "fifth", "active", "ignored"))
+    expect_identical(parsed$objects,
+        c("first", "second", "first", "first", "third", "third", "fourth",
+            "fifth", "active", "ignored"))
+    expect_identical(parsed$functs, c("first", "first", "fourth", "ignored"))
+    expect_identical(parsed$nonfuncts,
+        c("second", "first", "third", "loop", "third", "fifth", "active"))
+    expect_identical(names(parsed$functions), c("first", "fourth", "ignored"))
+    expect_identical(names(parsed$signatures), names(parsed$functions))
+    expect_identical(formals(parsed$functions$first), pairlist(y = 2))
+    expect_identical(parsed$signatures$first, "first(y = 2)")
+    expect_identical(parsed$definitions$first$type, "double")
+    expect_equal(parsed$definitions$first$range$start$line, 6L)
+    expect_identical(names(parsed$documentation), "first")
+    expect_match(parsed$documentation$first$markdown, "Replacement function", fixed = TRUE)
+    expect_false(any(grepl("_store$|_names$|_seen$", ls(parsed))))
+})
+
+test_that("Parser collectors handle many declarations in one nested expression", {
+    symbols <- paste0("value", seq_len(300L))
+    content <- c("if (TRUE) {", paste0(symbols, " <- 1"), "}", "value1 <- 2")
+    parsed <- parse_document("file:///collector-nested.R", content)
+    expect_identical(names(parsed$definitions), symbols)
+    expect_identical(parsed$objects, c(symbols, "value1"))
+    expect_identical(parsed$nonfuncts, c(symbols, "value1"))
+    expect_length(parsed$functions, 0L)
+    expect_equal(parsed$definitions$value1$range$start$line, 302L)
+})
+
 test_that("Parse callbacks discard stale work and superseded replies", {
     uri <- "file:///parse-callback.R"
     document <- Document$new(uri, version = 2L, content = "value <- 1")
@@ -42,6 +91,9 @@ test_that("Parse callbacks discard stale work and superseded replies", {
 
     expect_null(parse_callback(self, uri, 2L, NULL))
     expect_null(parse_callback(self, uri, 1L, parse_document(uri, "value <- 0")))
+    expect_null(parse_callback(self, uri, 2L,
+        parse_document(uri, "value <- 0"), source_content = "value <- 0"))
+    expect_identical(document$parse_data, previous)
 
     queue <- collections::queue()
     queue$push(list(id = 1L, version = 1L, params = list()))
@@ -88,7 +140,7 @@ test_that("Parse callbacks only resolve when the package request changes", {
     named_packages <- c(first = "stats", second = "utils")
     parse_callback(self, uri, 1L, parse_data(named_packages))
     expect_equal(resolve_count, 1L)
-    expect_identical(document$requested_packages, c("stats", "utils"))
+    expect_identical(document$requested_packages, list(packages = c("stats", "utils"), namespace_packages = character()))
 
     # Representation-only differences must not schedule another subprocess.
     parse_callback(self, uri, 1L, parse_data(c("stats", "utils")))
@@ -102,9 +154,105 @@ test_that("Parse callbacks only resolve when the package request changes", {
     # Package order controls masking, so reordering must trigger resolution.
     parse_callback(self, uri, 1L, parse_data(c("utils", "stats")))
     expect_equal(resolve_count, 2L)
-    expect_identical(document$requested_packages, c("utils", "stats"))
+    expect_identical(document$requested_packages, list(packages = c("utils", "stats"), namespace_packages = character()))
 
     # Adding or removing a package must also trigger resolution.
     parse_callback(self, uri, 1L, parse_data(c("utils", "stats", "methods")))
     expect_equal(resolve_count, 3L)
+
+    data <- parse_data(c("utils", "stats", "methods"))
+    data$member_data$packages <- "namespacefixture"
+    parse_callback(self, uri, 1L, data)
+    expect_equal(resolve_count, 4L)
+    expect_identical(document$requested_packages,
+        list(packages = c("utils", "stats", "methods"), namespace_packages = "namespacefixture"))
+    expect_identical(document$loaded_packages, c("utils", "stats", "methods"))
+    parse_callback(self, uri, 1L, data)
+    expect_equal(resolve_count, 4L)
+})
+
+test_that("Namespace-qualified factories request package metadata without library calls", {
+    data <- parse_document("file:///namespace.R", c(
+        "x <- stats::setNames(list(value=1), \"value\")",
+        "factory <- function() utils::head(x)", "x$value"
+    ))
+    expect_length(data$packages, 0L)
+    expect_identical(member_package_request(data), list(packages = character(), namespace_packages = c("stats", "utils")))
+    expect_identical(data$member_data$packages, c("stats", "utils"))
+    expect_length(data$member_data$imports, 0L)
+})
+
+test_that("empty package requests cancel obsolete resolution without a worker", {
+    uri <- "file:///no-packages.R"
+    workspace <- Workspace$new(NULL)
+    document <- Document$new(uri, version = 1L, content = "")
+    workspace$documents$set(uri, document)
+    manager <- TaskManager$new("resolve")
+    withr::defer(manager$stop())
+    self <- list(get_workspace = function(...) workspace, resolve_task_manager = manager,
+        pending_replies = collections::dict())
+    parse_callback(self, uri, 1L, parse_document(uri, ""))
+    expect_false(manager$has_work())
+    expect_identical(document$loaded_packages, character())
+
+    parse_callback(self, uri, 1L, parse_document(uri, "library(callr)"))
+    expect_true(manager$has_work())
+    parse_callback(self, uri, 1L, parse_document(uri, ""))
+    expect_false(manager$has_work())
+    expect_identical(document$loaded_packages, character())
+    expect_setequal(workspace$loaded_packages, workspace$startup_packages)
+
+    # Namespace-only requests still need metadata, even without attachments.
+    parse_callback(self, uri, 1L, parse_document(uri, "callr::r_bg"))
+    expect_true(manager$has_work())
+})
+
+test_that("Package requests distinguish attachment changes from namespace references", {
+    uri <- "file:///package-attachment.R"
+    workspace <- Workspace$new(NULL)
+    document <- Document$new(uri, version = 1L, content = "")
+    workspace$documents$set(uri, document)
+    count <- 0L
+    self <- list(get_workspace = function(...) workspace,
+        resolve_task_manager = list(add_task = function(...) count <<- count + 1L),
+        pending_replies = collections::dict(), request_handlers = list())
+    code <- c("x <- callr::r_bg(function() 42)", "library(callr); x <- r_bg(function() 42)")
+    for (i in c(1L, 2L, 1L)) {
+        parse_callback(self, uri, 1L, parse_document(uri, code[[i]]))
+        expect_identical(document$loaded_packages, if (i == 1L) character() else "callr")
+    }
+    expect_identical(count, 3L)
+    # An older resolution with the same merged names must not restore attachment.
+    requested <- member_package_request(parse_document(uri, code[[2L]]))
+    resolve_callback(self, uri, 0L, list(packages = "callr", members = list(), requested = requested))
+    expect_length(document$loaded_packages, 0L)
+})
+
+test_that("Background metadata resolution preserves packages requested by open documents", {
+    open_uri <- "file:///open.R"
+    background_uri <- "file:///background.R"
+    documents <- collections::dict()
+    document <- Document$new(open_uri, version = 1L)
+    document$did_open()
+    document$requested_packages <- list(packages = "attached", namespace_packages = "qualified")
+    documents$set(open_uri, document)
+    documents$set(background_uri, Document$new(background_uri, version = 1L))
+    metadata <- ByteLruCache$new(1024^2, max_entries = 2L)
+    workspace <- list(documents = documents, member_metadata = metadata,
+        load_packages = function(...) NULL, update_loaded_packages = function(...) NULL)
+    self <- list(get_workspace = function(...) workspace)
+    snapshot <- member_index_freeze(member_generic_index(""))
+    resolve_callback(self, open_uri, 1L, list(packages = "attached",
+            members = list(attached = snapshot, qualified = snapshot)))
+    resolve_callback(self, background_uri, 1L, list(packages = "background",
+            members = list(background = snapshot)))
+    expect_setequal(metadata$keys(), c("attached", "qualified"))
+
+    # Closing a document removes its preference on the next insertion.
+    document$did_close()
+    resolve_callback(self, background_uri, 1L, list(packages = "background",
+            members = list(background = snapshot)))
+    expect_true(metadata$has("background"))
+    expect_equal(metadata$size(), 2L)
+    expect_lte(metadata$bytes(), 1024^2)
 })

@@ -3,6 +3,9 @@
 call_argument_groups <- function(call_node) {
     children <- xml_children(call_node)
     child_names <- xml_name(children)
+    keep <- child_names != "COMMENT"
+    children <- children[keep]
+    child_names <- child_names[keep]
     open_indices <- which(child_names == "OP-LEFT-PAREN")
     close_indices <- which(child_names == "OP-RIGHT-PAREN")
     if (!length(open_indices) || !length(close_indices)) return(list())
@@ -38,6 +41,21 @@ call_argument_groups <- function(call_node) {
     groups
 }
 
+#' Whether a pipe supplies an implicit positional argument to this call
+#' @noRd
+call_has_implicit_argument <- function(call_node) {
+    operator <- xml_find_first(call_node, "preceding-sibling::*[not(self::COMMENT)][1]")
+    if (inherits(operator, "xml_missing")) return(FALSE)
+    if (xml_name(operator) %in% c("PIPE", "OP-PIPE")) {
+        placeholder <- xml_find_first(call_node, "expr[count(*) = 1]/PLACEHOLDER")
+    } else if (xml_name(operator) == "SPECIAL" && xml_text(operator) %in% c("%>%", "%<>%", "%T>%")) {
+        placeholder <- xml_find_first(call_node, "expr[count(*) = 1]/SYMBOL[text() = '.']")
+    } else {
+        return(FALSE)
+    }
+    inherits(placeholder, "xml_missing")
+}
+
 #' Match an R named argument using exact and unique partial matching
 #' @noRd
 match_named_formal <- function(name, formal_names) {
@@ -47,19 +65,153 @@ match_named_formal <- function(name, formal_names) {
     if (length(partial) == 1L) partial else NA_integer_
 }
 
+#' Move untouched calls with an incremental edit, discarding intersecting calls
+#' @noRd
+inlay_hint_last_call_end <- function(calls) {
+    if (!length(calls$name)) return(NULL)
+    line <- max(calls$end_line)
+    c(line, max(calls$end_col[calls$end_line == line]))
+}
+
+#' @noRd
+inlay_hint_apply_change <- function(indexed, change, content) {
+    if (is.null(indexed) || is.null(change$range)) return(NULL)
+    calls <- indexed$calls
+    if (!length(calls$name)) return(indexed)
+    start <- change$range$start
+    end <- change$range$end
+    last <- indexed$last_call_end
+    if (!is.null(last) && (start$line > last[[1L]] ||
+                start$line == last[[1L]] && start$character > last[[2L]])) {
+        return(indexed)
+    }
+    before <- calls$end_line < start$line |
+        calls$end_line == start$line & calls$end_col <= start$character
+    # A pipe on a preceding line is part of the argument-matching context.
+    after <- calls$context_line > end$line |
+        calls$context_line == end$line & calls$context_col >= end$character
+    line_text <- function(row) if (row < length(content)) content[[row + 1L]] else ""
+    # Inserts, replacements and deletions ending at a callee can change its
+    # name or turn it into a member call, even with spaces or tabs in between.
+    # Only retain whitespace replacements here; an empty replacement can
+    # join the callee to preceding text.
+    if (!nzchar(change$text) || grepl("[^[:space:]]", change$text)) {
+        end_text <- line_text(end$line)
+        end_col <- code_point_from_unit(end_text, end$character)
+        following <- substring(end_text, end_col + 1L)
+        first_token <- regexpr("[^[:space:]]", following)[[1L]]
+        boundary <- if (first_token > 0L) {
+            code_point_to_unit(end_text, end_col + first_token - 1L)
+        } else {
+            end$character
+        }
+        at_start <- calls$context_line == end$line & calls$context_col == boundary
+        after[at_start] <- FALSE
+        # Completing a pipe before a previously ordinary multiline call also
+        # changes its matching, even if another incomplete edit prevents parsing.
+        prefix <- substr(line_text(start$line), 1L,
+            code_point_from_unit(line_text(start$line), start$character))
+        if (grepl("(\\|>|%>%|%<>%|%T>%)[[:space:]]*(#[^\n]*)?$", paste0(prefix, change$text))) {
+            boundary_line <- end$line
+            repeat {
+                code <- sub("#.*$", "", following)
+                first_token <- regexpr("[^[:space:]]", code)[[1L]]
+                if (first_token > 0L || boundary_line + 1L >= length(content)) break
+                boundary_line <- boundary_line + 1L
+                following <- line_text(boundary_line)
+            }
+            if (first_token > 0L) {
+                boundary_col <- if (boundary_line == end$line) boundary else
+                    code_point_to_unit(following, first_token - 1L)
+                after[calls$line == boundary_line & calls$col == boundary_col] <- FALSE
+            }
+        }
+    }
+    # An edit outside a call can still put it in a comment, string or
+    # backtick name. Drop following calls when lexical context may change.
+    removed <- get_range_text(
+        content, start$line + 1L,
+        code_point_from_unit(line_text(start$line), start$character) + 1L,
+        end$line + 1L,
+        code_point_from_unit(line_text(end$line), end$character)
+    )
+    if (any(grepl(r"([#"'`\\])", c(change$text, removed), useBytes = TRUE), na.rm = TRUE)) {
+        after[] <- FALSE
+    }
+    keep <- before | after
+    if (!any(keep)) return(NULL)
+
+    replacement <- stringi::stri_split_lines(change$text)[[1L]]
+    new_end_line <- start$line + length(replacement) - 1L
+    new_end_col <- code_point_to_unit(utils::tail(replacement, 1L), Inf)
+    if (length(replacement) == 1L) new_end_col <- new_end_col + start$character
+    shift <- function(lines, cols, move) {
+        same_line <- move & !is.na(lines) & lines == end$line
+        cols[same_line] <- cols[same_line] + new_end_col - end$character
+        lines[move] <- lines[move] + new_end_line - end$line
+        list(line = lines, col = cols)
+    }
+    for (fields in list(c("line", "col"), c("end_line", "end_col"), c("context_line", "context_col"))) {
+        moved <- shift(calls[[fields[[1L]]]], calls[[fields[[2L]]]], after)
+        calls[[fields[[1L]]]] <- moved$line
+        calls[[fields[[2L]]]] <- moved$col
+    }
+    arguments <- indexed$arguments
+    moved <- shift(arguments$line, arguments$col, after[arguments$call])
+    arguments$line <- moved$line
+    arguments$col <- moved$col
+
+    kept_arguments <- which(keep[arguments$call])
+    arguments <- lapply(arguments, `[`, kept_arguments)
+    arguments$call <- match(arguments$call, which(keep))
+    calls <- lapply(calls, `[`, which(keep))
+    calls$first_argument <- match(calls$first_argument, kept_arguments)
+    calls$last_argument <- match(calls$last_argument, kept_arguments)
+    indexed$calls <- calls
+    indexed$arguments <- arguments
+    indexed$argument_order <- which(arguments$present)
+    indexed$argument_order <- indexed$argument_order[order(
+        arguments$line[indexed$argument_order], arguments$col[indexed$argument_order]
+    )]
+    indexed$argument_lines <- arguments$line[indexed$argument_order]
+    indexed$last_call_end <- inlay_hint_last_call_end(calls)
+    indexed
+}
+
 #' Extract parameter-name inlay hints for calls in a requested range
 #' @noRd
 inlay_hint_reply <- function(id, uri, workspace, document, request_range) {
     parse_data <- current_parse_data(uri, workspace, document)
     if (is.null(parse_data)) return(NULL)
-    xdoc <- parse_data$xml_doc
-    if (is.null(xdoc)) return(Response$new(id, result = list()))
-
+    incomplete <- isTRUE(parse_data$parse_error) || isTRUE(parse_data$inlay_hint_incomplete)
+    if (incomplete && !is.null(document$inlay_hint_data)) {
+        previous <- indexed_inlay_hint_reply(
+            id, uri, workspace, document$inlay_hint_data, request_range,
+            document$inlay_hint_formals, use_previous_formals = TRUE,
+            regions = document$regions,
+            fallback_lines = if (isTRUE(parse_data$parse_error)) NULL else
+                parse_data$inlay_hint_incomplete_lines
+        )
+        if (isTRUE(parse_data$parse_error)) return(previous)
+        # Literate documents still parse their other R cells successfully.
+        current <- indexed_inlay_hint_reply(
+            id, uri, workspace, parse_data$range_data, request_range
+        )
+        hints <- c(current$result, previous$result)
+        positions <- vapply(hints, function(hint) {
+            paste(hint$position$line, hint$position$character, sep = ":")
+        }, character(1L))
+        return(Response$new(id, result = utils::head(hints[!duplicated(positions)], 200L)))
+    }
     if (!is.null(parse_data$range_data)) {
         return(indexed_inlay_hint_reply(
-            id, uri, workspace, parse_data$range_data, request_range
+            id, uri, workspace, parse_data$range_data, request_range,
+            document$inlay_hint_formals
         ))
     }
+
+    xdoc <- parse_data_xml(parse_data)
+    if (is.null(xdoc)) return(Response$new(id, result = list()))
 
     start_line <- request_range$start$line + 1L
     end_line <- request_range$end$line + 1L
@@ -71,24 +223,24 @@ inlay_hint_reply <- function(id, uri, workspace, document, request_range) {
         paste0(
             "//expr[@line2 >= ", start_line,
             " and @line1 <= ", end_line,
-            " and expr[1][following-sibling::*[1]",
+            " and expr[1][following-sibling::*[not(self::COMMENT)][1]",
             "[self::OP-LEFT-PAREN]] and ",
-            "expr[1]//SYMBOL_FUNCTION_CALL]"
+            "expr[1]/SYMBOL_FUNCTION_CALL]"
         )
     )
     if (!length(calls)) return(Response$new(id, result = list()))
 
     minimum_arguments <- lsp_settings$get("inlay_hints_minimum_arguments")
     if (!is.numeric(minimum_arguments) || length(minimum_arguments) != 1L ||
-        is.na(minimum_arguments) || minimum_arguments < 0L) {
+            is.na(minimum_arguments) || minimum_arguments < 0L) {
         minimum_arguments <- 2L
     }
     minimum_argument_length <- lsp_settings$get(
         "inlay_hints_minimum_argument_length"
     )
     if (!is.numeric(minimum_argument_length) ||
-        length(minimum_argument_length) != 1L ||
-        is.na(minimum_argument_length) || minimum_argument_length < 0L) {
+            length(minimum_argument_length) != 1L ||
+            is.na(minimum_argument_length) || minimum_argument_length < 0L) {
         minimum_argument_length <- 2L
     }
 
@@ -98,15 +250,15 @@ inlay_hint_reply <- function(id, uri, workspace, document, request_range) {
         callee <- xml_find_first(call_node, "expr[1]")
         member_operator <- xml_find_first(
             callee,
-            ".//*[self::OP-DOLLAR or self::OP-AT]"
+            "./*[self::OP-DOLLAR or self::OP-AT]"
         )
         if (!inherits(member_operator, "xml_missing")) next
 
-        function_node <- xml_find_first(callee, ".//SYMBOL_FUNCTION_CALL[1]")
+        function_node <- xml_find_first(callee, "./SYMBOL_FUNCTION_CALL[1]")
         if (inherits(function_node, "xml_missing")) next
 
         function_name <- xml_text(function_node)
-        package_node <- xml_find_first(callee, ".//SYMBOL_PACKAGE[1]")
+        package_node <- xml_find_first(callee, "./SYMBOL_PACKAGE[1]")
         package <- if (inherits(package_node, "xml_missing")) NULL else xml_text(package_node)
         cache_key <- paste(if (is.null(package)) "" else package, function_name, sep = "::")
         if (exists(cache_key, envir = formals_cache, inherits = FALSE)) {
@@ -114,7 +266,7 @@ inlay_hint_reply <- function(id, uri, workspace, document, request_range) {
         } else {
             function_formals <- tryCatch(call_with_optional_uri(
                 workspace$get_formals, function_name, package, uri = uri),
-                error = function(e) NULL)
+            error = function(e) NULL)
             assign(cache_key, function_formals, envir = formals_cache)
         }
 
@@ -123,8 +275,9 @@ inlay_hint_reply <- function(id, uri, workspace, document, request_range) {
         groups <- call_argument_groups(call_node)
         if (!length(groups)) next
 
+        implicit_argument <- call_has_implicit_argument(call_node)
         supplied_arguments <- sum(vapply(
-            groups, function(group) length(group$nodes) > 0L, logical(1L)))
+            groups, function(group) length(group$nodes) > 0L, logical(1L))) + implicit_argument
         if (supplied_arguments < minimum_arguments) next
 
         named_formals <- vapply(groups, function(group) {
@@ -133,6 +286,10 @@ inlay_hint_reply <- function(id, uri, workspace, document, request_range) {
         }, integer(1L))
         unavailable <- unique(named_formals[!is.na(named_formals)])
         available <- setdiff(seq_along(formal_names), unavailable)
+        if (implicit_argument) {
+            if (!length(available) || formal_names[[available[[1L]]]] == "...") next
+            available <- available[-1L]
+        }
         next_available <- 1L
 
         for (group in groups) {
@@ -177,7 +334,9 @@ inlay_hint_reply <- function(id, uri, workspace, document, request_range) {
 
 #' Resolve hints only for calls with an argument visible in the viewport
 #' @noRd
-indexed_inlay_hint_reply <- function(id, uri, workspace, indexed, request_range) {
+indexed_inlay_hint_reply <- function(id, uri, workspace, indexed, request_range,
+    previous_formals = NULL, use_previous_formals = FALSE, regions = NULL,
+    fallback_lines = NULL) {
     arguments <- indexed$arguments
     visible <- indexed$argument_order[range_line_indices(
         indexed$argument_lines,
@@ -186,6 +345,12 @@ indexed_inlay_hint_reply <- function(id, uri, workspace, indexed, request_range)
     visible <- visible[range_position_selected(
         arguments$line[visible], arguments$col[visible], request_range
     )]
+    if (!is.null(regions)) {
+        visible <- visible[regions$line_type[arguments$line[visible] + 1L] == "r"]
+    }
+    if (!is.null(fallback_lines)) {
+        visible <- visible[arguments$line[visible] %in% fallback_lines]
+    }
     if (!length(visible)) return(Response$new(id, result = list()))
     calls <- indexed$calls
     call_indices <- sort(unique(arguments$call[visible]))
@@ -207,7 +372,8 @@ indexed_inlay_hint_reply <- function(id, uri, workspace, indexed, request_range)
     hint_count <- 0L
     for (call_index in call_indices) {
         groups <- seq.int(calls$first_argument[[call_index]], calls$last_argument[[call_index]])
-        if (sum(arguments$present[groups]) < minimum_arguments) next
+        implicit_argument <- isTRUE(calls$implicit_argument[[call_index]])
+        if (sum(arguments$present[groups]) + implicit_argument < minimum_arguments) next
         function_name <- calls$name[[call_index]]
         package <- calls$package[[call_index]]
         if (is.na(package)) package <- NULL
@@ -215,10 +381,20 @@ indexed_inlay_hint_reply <- function(id, uri, workspace, indexed, request_range)
         if (exists(cache_key, envir = formals_cache, inherits = FALSE)) {
             formal_names <- get(cache_key, envir = formals_cache, inherits = FALSE)
         } else {
-            function_formals <- tryCatch(call_with_optional_uri(
-                workspace$get_formals, function_name, package, uri = uri),
-            error = function(e) NULL)
-            formal_names <- names(function_formals)
+            formal_names <- if (use_previous_formals && !is.null(previous_formals)) {
+                get0(cache_key, envir = previous_formals, inherits = FALSE)
+            } else {
+                NULL
+            }
+            if (is.null(formal_names)) {
+                function_formals <- tryCatch(call_with_optional_uri(
+                    workspace$get_formals, function_name, package, uri = uri),
+                error = function(e) NULL)
+                formal_names <- names(function_formals)
+                if (!use_previous_formals && !is.null(previous_formals)) {
+                    assign(cache_key, formal_names, envir = previous_formals)
+                }
+            }
             assign(cache_key, formal_names, envir = formals_cache)
         }
         if (!length(formal_names)) next
@@ -227,6 +403,10 @@ indexed_inlay_hint_reply <- function(id, uri, workspace, indexed, request_range)
         named_formals <- vapply(group_names[named], match_named_formal,
             integer(1L), formal_names = formal_names)
         available <- setdiff(seq_along(formal_names), named_formals[!is.na(named_formals)])
+        if (implicit_argument) {
+            if (!length(available) || formal_names[[available[[1L]]]] == "...") next
+            available <- available[-1L]
+        }
         unnamed <- groups[!named]
         n <- min(length(unnamed), length(available))
         if (!n) next

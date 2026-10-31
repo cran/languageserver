@@ -1,3 +1,28 @@
+test_that("Unicode columns are converted once per line with scalar-equivalent positions", {
+    content <- c(paste0("\"", intToUtf8(0x1f600), "\"; ", intToUtf8(0x03b1), " <- 1; ",
+        intToUtf8(0x03b1), " + ", intToUtf8(0x03b1)), "plain <- plain", "é <- é")
+    lines <- c(1L, 1L, 2L, 1L, 3L, NA_integer_)
+    starts <- c(0L, 5L, 0L, 12L, 0L, NA_integer_)
+    ends <- c(3L, 6L, 5L, 13L, 1L, NA_integer_)
+    scalar <- function(points) {
+        vapply(seq_along(points), function(i) {
+            if (is.na(lines[[i]])) return(NA_integer_)
+            code_point_to_unit(content[[lines[[i]]]], points[[i]])
+        }, integer(1L))
+    }
+    expected <- list(start = scalar(starts), end = scalar(ends))
+    calls <- list()
+    convert <- syntax_unit_columns
+    stub(convert, "code_point_to_unit", function(line, pts) {
+        calls[[length(calls) + 1L]] <<- line
+        code_point_to_unit(line, pts)
+    })
+    expect_identical(convert(content, lines, starts, ends), expected)
+    expect_identical(unlist(calls, use.names = FALSE), content[c(1L, 3L)])
+    expect_identical(syntax_unit_columns(character(), integer(), integer(), integer()),
+        list(start = integer(), end = integer()))
+})
+
 test_that("Semantic tokens full works", {
     skip_on_cran()
     client <- language_client()
@@ -497,4 +522,41 @@ test_that("Semantic deltas handle equality, insertion, and deletion", {
     expect_equal(deleted$start, 5L)
     expect_equal(deleted$deleteCount, 5L)
     expect_null(deleted$data)
+})
+
+test_that("Function assignments with comments around operators emit declaration tokens", {
+    uri <- "file:///commented-fn.R"
+    content <- c(
+        "first <-",
+        "  # comment after left assign",
+        "  function(x) x",
+        "second =",
+        "  # comment after equal assign",
+        "  function(y) y",
+        "(function(z) z) ->",
+        "  # comment after right assign",
+        "  third",
+        "(",
+        "  fourth # comment before left assign",
+        "    <- function(w) w",
+        ")",
+        "(",
+        "  (function(v) v) # comment before right assign",
+        "    -> fifth",
+        ")"
+    )
+    parse_data <- parse_document(uri, content)
+    expect_false(parse_data$parse_error)
+    document <- Document$new(uri, version = 1L, content = content)
+    workspace <- list(get_parse_data = function(...) parse_data)
+
+    tokens <- extract_semantic_tokens(uri, workspace, document)
+    fn_declarations <- Filter(function(token) {
+        token$tokenType == SemanticTokenTypes[["function"]] &&
+            token$tokenModifiers != 0L
+    }, tokens)
+    expect_identical(
+        vapply(fn_declarations, `[[`, integer(1L), "line"),
+        c(0L, 3L, 8L, 10L, 15L)
+    )
 })

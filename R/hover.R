@@ -18,17 +18,20 @@ function_argument_hover_contents <- function(workspace, funct, package, paramete
             funct, package, isf = TRUE, uri = uri)
     }
     if (!is.list(doc)) return(NULL)
+    sig <- if (is.null(uri)) workspace$get_signature(funct, package)
+    else call_with_optional_uri(
+        workspace$get_signature, funct, package, uri = uri)
+    argument_hover_contents(doc, sig, parameter)
+}
 
+argument_hover_contents <- function(doc, sig, parameter) {
+    if (!is.list(doc)) return(NULL)
     doc_string <- doc$arguments[[parameter]]
     if (is.null(doc_string)) {
         doc_string <- doc$arguments$...
         parameter <- "..."
     }
     if (is.null(doc_string)) return(NULL)
-
-    sig <- if (is.null(uri)) workspace$get_signature(funct, package)
-    else call_with_optional_uri(
-        workspace$get_signature, funct, package, uri = uri)
     if (is.null(sig)) return(doc_string)
 
     c(
@@ -43,10 +46,36 @@ function_argument_hover_contents <- function(workspace, funct, package, paramete
 #' if it exists in the current [Workspace].
 #' @noRd
 hover_reply <- function(id, uri, workspace, document, point) {
+    if (isTRUE(lsp_settings$get("member_completion"))) {
+        location <- member_hover_location(document, point)
+        if (is.null(location)) location <- member_argument_location(document, point)
+        if (!is.null(location)) {
+            return(member_hover_reply(id, uri, workspace, document, location))
+        }
+        location <- if (member_symbol_required(workspace, document)) {
+            found <- member_argument_location(document, point, symbols = TRUE)
+            if (is.null(found)) found <- member_symbol_location(document, point)
+            found
+        }
+        symbol <- if (!is.null(location)) member_symbol(uri, workspace, document, location)
+        if (!is.null(symbol$value$s7_generator) || !is.null(symbol$value$r6_role) ||
+                !is.null(symbol$value$r6_owner)) {
+            return(member_hover_reply(id, uri, workspace, document, location, symbol))
+        }
+    }
     if (!check_scope(uri, document, point)) {
         return(Response$new(id))
     }
 
+    s3 <- tryCatch(resolve_s3_call(uri, workspace, document, point, hover = TRUE),
+        error = function(e) {
+            logger$info("S3 hover:", e)
+            NULL
+        })
+    if (!is.null(s3)) {
+        reply <- s3_hover_reply(id, workspace, document, point, s3)
+        if (!is.null(reply)) return(reply)
+    }
     token_result <- document$detect_token(point)
     range <- token_result$range
 
@@ -56,7 +85,14 @@ hover_reply <- function(id, uri, workspace, document, point) {
     version <- workspace$get_parse_data(uri)$version
     logger$info("hover:", list(uri = uri, version = version, token = token_result))
 
-    xdoc <- workspace$get_parse_data(uri)$xml_doc
+    parse_data <- workspace$get_parse_data(uri)
+    syntax <- parse_data$syntax_data
+    if (token_result$accessor == "" && !is.null(syntax)) {
+        local <- navigation_hover(uri, workspace, document, parse_data, point$row + 1L, point$col + 1L)
+        contents <- local$contents
+        resolved <- local$resolved
+    }
+    xdoc <- if (is.null(syntax)) parse_data_xml(parse_data)
 
     if (token_result$accessor == "" && !is.null(xdoc)) {
         row <- point$row + 1
@@ -96,7 +132,7 @@ hover_reply <- function(id, uri, workspace, document, point) {
                         doc_line1 <- detect_comments(document$content, def_line1 - 1) + 1
                         if (doc_line1 < def_line1) {
                             comment <- document$content[doc_line1:(def_line1 - 1)]
-                            doc <- convert_comment_to_documentation(comment)
+                            doc <- analysis_documentation(document, comment)
                             if (is.character(doc)) {
                                 doc_string <- doc
                             } else if (is.list(doc)) {
@@ -132,7 +168,7 @@ hover_reply <- function(id, uri, workspace, document, point) {
                             doc_line1 <- detect_comments(document$content, func_line1 - 1) + 1
                             if (doc_line1 < func_line1) {
                                 comment <- document$content[doc_line1:(func_line1 - 1)]
-                                doc <- convert_comment_to_documentation(comment)
+                                doc <- analysis_documentation(document, comment)
                                 if (is.list(doc)) {
                                     doc_string <- doc$arguments[[token_text]]
                                     if (!is.null(doc_string)) {
@@ -161,7 +197,7 @@ hover_reply <- function(id, uri, workspace, document, point) {
 
                 if (doc_line1 < func_line1) {
                     comment <- document$content[doc_line1:(func_line1 - 1)]
-                    doc <- convert_comment_to_documentation(comment)
+                    doc <- analysis_documentation(document, comment)
                     if (is.list(doc)) {
                         doc_string <- doc$arguments[[token_text]]
                         if (!is.null(doc_string)) {

@@ -8,12 +8,29 @@ Document <- R6::R6Class(
         nline = 0,
         content = NULL,
         call_scan_cache = NULL,
+        signature_call_cache = NULL,
         parse_data = NULL,
+        completion_outline = NULL,
+        parse_generation = 0L,
+        parse_failure = NULL,
+        parsed_content = NULL,
+        inlay_hint_data = NULL,
+        inlay_hint_formals = NULL,
         is_rmarkdown = NULL,
         regions = NULL,
         loaded_packages = NULL,
         requested_packages = NULL,
+        member_refresh = FALSE,
+        member_receivers = NULL,
+        member_binding_cache = NULL,
+        analysis_caches = NULL,
+        s3_calls = NULL,
+        s3_identity = NULL,
+        member_revision = NULL,
+        member_ordinary_edit = FALSE,
         pending_diagnostics = FALSE,
+        diagnostics_generation = NULL,
+        index_content_hash = NULL,
         diagnostics_delay = 0,
 
         initialize = function(uri, language = NULL, version = NULL, content = "") {
@@ -21,6 +38,8 @@ Document <- R6::R6Class(
             self$language <- language
             self$version <- version
             self$is_rmarkdown <- is_rmarkdown(uri, language)
+            self$member_receivers <- ByteLruCache$new(4 * 1024^2, max_entries = 32L)
+            self$s3_calls <- ByteLruCache$new(1 * 1024^2, max_entries = 32L)
             self$set_content(version, content)
             self$loaded_packages <- character()
             self$requested_packages <- NULL
@@ -34,7 +53,33 @@ Document <- R6::R6Class(
             self$is_open <- FALSE
         },
 
-        set_content = function(version, content) {
+        set_content = function(version, content, change = NULL) {
+            self$completion_outline <- NULL
+            self$member_receivers$clear()
+            self$s3_calls$clear()
+            current <- identical(self$version, self$parse_data$version) || isTRUE(self$member_ordinary_edit)
+            # A standalone identifier changes no declaration, call, delimiter
+            # or lexical scope. Full replacements and all structural edits
+            # still require the accepted current-version parse.
+            self$member_ordinary_edit <- FALSE
+            if (current && !self$is_rmarkdown && !isTRUE(self$parse_data$parse_error) &&
+                    !is.null(change$range) && length(content) == length(self$content) &&
+                    change$range$start$line == length(content) - 1L &&
+                    change$range$end$line == length(content) - 1L) {
+                changed <- length(content)
+                items <- self$parse_data$member_data$items
+                last <- if (length(items)) items[[length(items)]]
+                standalone <- is.null(last) || last$end[[1L]] < length(content) - 1L ||
+                    (is.symbol(last$expr) && last$start[[1L]] == length(content) - 1L)
+                if (standalone && !identical(content[[changed]], self$content[[changed]])) {
+                    pattern <- "^[ \\t]*[[:alnum:]_.]*[ \\t]*$"
+                    self$member_ordinary_edit <- grepl(pattern, self$content[[changed]]) &&
+                        grepl(pattern, content[[changed]])
+                }
+            }
+            if (!identical(self$content, content)) {
+                self$inlay_hint_data <- inlay_hint_apply_change(self$inlay_hint_data, change, self$content)
+            }
             self$version <- version
             self$nline <- length(content)
             self$content <- content
@@ -93,12 +138,25 @@ Document <- R6::R6Class(
                 } else {
                     character()
                 }
-                self$set_content(version, c(before, changed, after))
+                self$set_content(version, c(before, changed, after), change)
             }
         },
 
         update_parse_data = function(parse_data) {
+            self$completion_outline <- NULL
+            self$member_receivers$clear()
+            self$s3_calls$clear()
+            self$member_ordinary_edit <- FALSE
             self$parse_data <- parse_data
+            self$parsed_content <- self$content
+            if (!isTRUE(parse_data$parse_error) && !isTRUE(parse_data$inlay_hint_incomplete)) {
+                self$inlay_hint_data <- parse_data$range_data[c(
+                    "calls", "arguments", "argument_order", "argument_lines"
+                )]
+                self$inlay_hint_data$last_call_end <-
+                    inlay_hint_last_call_end(self$inlay_hint_data$calls)
+                self$inlay_hint_formals <- new.env(parent = emptyenv())
+            }
         },
 
         line = function(row) {
@@ -123,11 +181,23 @@ Document <- R6::R6Class(
             ))
         },
 
-        detect_call = function(point) {
+        detect_call = function(point, signature = FALSE) {
             row <- point$row
             col <- point$col
 
-            if (col > 0) {
+            if (signature) {
+                bounds <- document_r_bounds(self, row)
+                if (is.null(bounds)) return(list(token = ""))
+                if (is.null(self$signature_call_cache)) {
+                    self$signature_call_cache <- .Call("new_signature_call_cache_c",
+                        PACKAGE = "languageserver")
+                }
+                fub_result <- .Call("signature_call_bracket_c",
+                    self$content, row, col, bounds[[1L]], self$signature_call_cache,
+                    PACKAGE = "languageserver")
+                loc <- fub_result[[1L]]
+                bracket <- fub_result[[2L]]
+            } else if (col > 0) {
                 if (is.null(self$call_scan_cache)) {
                     self$call_scan_cache <- .Call("new_bracket_scan_cache_c",
                         PACKAGE = "languageserver")
@@ -146,14 +216,23 @@ Document <- R6::R6Class(
             if (loc[1] < 0 || loc[2] < 0 || bracket != "(")
                 return(list(token = ""))
 
-            result <- self$find_token(loc[1], loc[2], forward = FALSE)
+            opening <- list(row = loc[[1L]], col = loc[[2L]])
+            callee <- document_call_callee(self, opening)
+            call_row <- if (is.null(callee)) opening$row else callee$row
+            call_col <- if (is.null(callee)) opening$col else callee$col
+            result <- self$find_token(call_row, call_col, forward = FALSE)
+            if (result$token %in% c("if", "for", "while", "function")) {
+                result <- list(full_token = "", package = NULL, accessor = "", token = "")
+            }
             logger$info("call:", result)
 
             list(
                 full_token = result$full_token,
                 package = result$package,
                 accessor = result$accessor,
-                token = result$token
+                token = result$token,
+                opening = opening,
+                callee = callee
             )
         },
 
@@ -265,7 +344,7 @@ is_base_call <- function(x) {
 
 # Handle `base` function specically by removing the `base::` prefix
 fun_string <- function(x) {
-    if (is_base_call(x)) as.character(x[[3L]]) else deparse(x)
+    if (is_base_call(x)) as.character(x[[3L]]) else deparse1(x)
 }
 
 # to see the pos/env/assign.env of assigning functions is set or not
@@ -283,7 +362,8 @@ is_top_level <- function(arg_env, ...) {
     any(vapply(top_level_envs, identical, x = arg_env, FUN.VALUE = logical(1L)))
 }
 
-null_function <- local(function() NULL, baseenv())
+null_function <- utils::removeSource(local(function() NULL, baseenv()))
+any_args_function <- utils::removeSource(local(function(...) NULL, baseenv()))
 
 parser_hooks <- list(
     "{" = function(expr, action) {
@@ -428,16 +508,13 @@ parse_expr <- function(content, expr, env, srcref = attr(expr, "srcref")) {
                         values <- updates[[name]]
                         values <- values[nzchar(values)]
                         if (length(values)) {
-                            if (name == "nonfuncts" &&
-                                    !is.null(env$nonfuncts_n)) {
-                                existing <- if (env$nonfuncts_n) {
-                                    env$nonfuncts[seq_len(env$nonfuncts_n)]
-                                } else {
-                                    character()
-                                }
-                                for (value in setdiff(values, existing)) {
-                                    env$nonfuncts_n <- env$nonfuncts_n + 1L
-                                    env$nonfuncts[[env$nonfuncts_n]] <- value
+                            if (name == "nonfuncts") {
+                                for (value in values) {
+                                    if (!exists(value, envir = env$nonfuncts_seen,
+                                            inherits = FALSE)) {
+                                        env$nonfuncts$push(value)
+                                        assign(value, TRUE, envir = env$nonfuncts_seen)
+                                    }
                                 }
                             } else {
                                 env[[name]] <- union(env[[name]], values)
@@ -448,15 +525,13 @@ parse_expr <- function(content, expr, env, srcref = attr(expr, "srcref")) {
                 assign = function(symbol, value, type = get_expr_type(value)) {
                     if (!nzchar(symbol)) return(NULL)
 
-                    env$objects_n <- env$objects_n + 1L
-                    env$objects[[env$objects_n]] <- symbol
+                    env$objects$push(symbol)
 
                     expr_range <- expr_range(srcref)
                     if (!exists(
                         symbol, envir = env$definitions_store,
                         inherits = FALSE)) {
-                        env$definitions_n <- env$definitions_n + 1L
-                        env$definition_names[[env$definitions_n]] <- symbol
+                        env$definition_names$push(symbol)
                     }
                     assign(symbol, list(
                         name = symbol,
@@ -470,34 +545,31 @@ parse_expr <- function(content, expr, env, srcref = attr(expr, "srcref")) {
                         if (!exists(
                             symbol, envir = env$documentation_store,
                             inherits = FALSE)) {
-                            env$documentation_n <- env$documentation_n + 1L
-                            env$documentation_names[[env$documentation_n]] <- symbol
+                            env$documentation_names$push(symbol)
                         }
                         assign(
                             symbol,
-                            convert_comment_to_documentation(comment),
+                            analysis_documentation(NULL, comment),
                             envir = env$documentation_store
                         )
                     }
 
                     if (type == "function") {
-                        env$functs_n <- env$functs_n + 1L
-                        env$functs[[env$functs_n]] <- symbol
+                        env$functs$push(symbol)
                         fun <- null_function
                         formals(fun) <- value[[2L]]
                         if (!exists(
                             symbol, envir = env$functions_store,
                             inherits = FALSE)) {
-                            env$functions_n <- env$functions_n + 1L
-                            env$function_names[[env$functions_n]] <- symbol
+                            env$function_names$push(symbol)
                         }
-                        assign(symbol, fun, envir = env$functions_store)
+                        assign(symbol, utils::removeSource(fun), envir = env$functions_store)
                         assign(
                             symbol, get_signature(symbol, value),
                             envir = env$signatures_store)
                     } else {
-                        env$nonfuncts_n <- env$nonfuncts_n + 1L
-                        env$nonfuncts[[env$nonfuncts_n]] <- symbol
+                        env$nonfuncts$push(symbol)
+                        assign(symbol, TRUE, envir = env$nonfuncts_seen)
                     }
                 },
                 parse = function(expr, srcref_override = NULL) {
@@ -550,8 +622,15 @@ get_content_hash <- function(content) {
 }
 
 parse_document <- function(uri, content, is_rmarkdown = FALSE,
-    content_hash = NULL) {
-    content <- normalize_parse_content(content, is_rmarkdown)
+    content_hash = NULL, include_xml = TRUE) {
+    parse_content <- normalize_parse_content(content, is_rmarkdown)
+    inlay_hint_incomplete_lines <- if (is_rmarkdown) {
+        which(parse_content != normalize_parse_content(
+            content, is_rmarkdown, parseable_only = FALSE)) - 1L
+    } else {
+        integer()
+    }
+    content <- parse_content
     if (is.null(content_hash)) content_hash <- get_content_hash(content)
 
     parse_env <- function() {
@@ -566,7 +645,13 @@ parse_document <- function(uri, content, is_rmarkdown = FALSE,
         env$documentation <- list()
         env$xml_data <- NULL
         env$xml_doc <- NULL
+        env$xml_deferred <- FALSE
+        env$syntax_data <- syntax_parse_data(NULL)
+        env$outline_data <- outline_parse_data(env$syntax_data)
+        env$class_data <- NULL
+        env$navigation_data <- navigation_parse_data(env$syntax_data)
         env$completion_data <- completion_parse_data(NULL)
+        env$member_data <- NULL
         env$semantic_data <- empty_semantic_data()
         env$range_data <- range_provider_parse_data(NULL, content)
         env$source_specs <- list()
@@ -574,6 +659,8 @@ parse_document <- function(uri, content, is_rmarkdown = FALSE,
             NULL, content, env$completion_data, uri, env$definitions)
         env$content_hash <- content_hash
         env$parse_error <- FALSE
+        env$inlay_hint_incomplete <- length(inlay_hint_incomplete_lines) > 0L
+        env$inlay_hint_incomplete_lines <- inlay_hint_incomplete_lines
         env
     }
     env <- parse_env()
@@ -581,72 +668,80 @@ parse_document <- function(uri, content, is_rmarkdown = FALSE,
     logger$info("parse_document: parsing", uri)
     expr <- tryCatch(parse(text = content, keep.source = TRUE), error = function(e) NULL)
     if (!is.null(expr)) {
-        capacity <- max(length(expr), 1L)
-        env$objects <- character(capacity)
-        env$functs <- character(capacity)
-        env$nonfuncts <- character(capacity)
-        env$objects_n <- 0L
-        env$functs_n <- 0L
-        env$nonfuncts_n <- 0L
+        # Native queues append in constant time. Updating vectors bound to an
+        # environment copies their whole capacity on every assignment.
+        env$objects <- collections::queue()
+        env$functs <- collections::queue()
+        env$nonfuncts <- collections::queue()
+        env$nonfuncts_seen <- new.env(hash = TRUE, parent = emptyenv())
         env$definitions_store <- new.env(hash = TRUE, parent = emptyenv())
         env$documentation_store <- new.env(hash = TRUE, parent = emptyenv())
         env$functions_store <- new.env(hash = TRUE, parent = emptyenv())
         env$signatures_store <- new.env(hash = TRUE, parent = emptyenv())
-        env$definition_names <- character(capacity)
-        env$documentation_names <- character(capacity)
-        env$function_names <- character(capacity)
-        env$definitions_n <- 0L
-        env$documentation_n <- 0L
-        env$functions_n <- 0L
+        env$definition_names <- collections::queue()
+        env$documentation_names <- collections::queue()
+        env$function_names <- collections::queue()
 
         parse_expr(content, expr, env)
-        trim <- function(values, count) {
-            if (count) values[seq_len(count)] else character()
+        names_vector <- function(queue) {
+            if (queue$size()) unlist(queue$as_list(), use.names = FALSE)
+            else character()
         }
-        materialize <- function(store, names, count) {
-            if (!count) return(list())
-            mget(names[seq_len(count)], envir = store, inherits = FALSE)
+        materialize <- function(store, names) {
+            if (!names$size()) return(list())
+            mget(names_vector(names), envir = store, inherits = FALSE)
         }
-        env$objects <- trim(env$objects, env$objects_n)
-        env$functs <- trim(env$functs, env$functs_n)
-        env$nonfuncts <- trim(env$nonfuncts, env$nonfuncts_n)
+        env$objects <- names_vector(env$objects)
+        env$functs <- names_vector(env$functs)
+        env$nonfuncts <- names_vector(env$nonfuncts)
         env$definitions <- materialize(
-            env$definitions_store, env$definition_names, env$definitions_n)
+            env$definitions_store, env$definition_names)
         env$documentation <- materialize(
             env$documentation_store,
-            env$documentation_names,
-            env$documentation_n
+            env$documentation_names
         )
         env$functions <- materialize(
-            env$functions_store, env$function_names, env$functions_n)
+            env$functions_store, env$function_names)
         env$signatures <- materialize(
-            env$signatures_store, env$function_names, env$functions_n)
+            env$signatures_store, env$function_names)
         rm(list = c(
-            "objects_n", "functs_n", "nonfuncts_n",
+            "nonfuncts_seen",
             "definitions_store", "documentation_store",
             "functions_store", "signatures_store",
-            "definition_names", "documentation_names", "function_names",
-            "definitions_n", "documentation_n", "functions_n"
+            "definition_names", "documentation_names", "function_names"
         ), envir = env)
 
         env$packages <- basename(find.package(env$packages, quiet = TRUE))
         data <- utils::getParseData(expr)
-        env$completion_data <- completion_parse_data(data)
-        env$semantic_data <- semantic_parse_data(data, content)
-        env$range_data <- range_provider_parse_data(data, content)
+        env$syntax_data <- syntax_parse_data(data)
+        env$outline_data <- outline_parse_data(env$syntax_data)
+        env$navigation_data <- navigation_parse_data(env$syntax_data)
+        env$member_data <- member_document_index(content, expr, data)
+        env$completion_data <- completion_parse_data(data, env$syntax_data)
+        env$semantic_data <- semantic_parse_data(data, content, env$syntax_data)
+        env$range_data <- range_provider_parse_data(data, content, env$syntax_data)
         env$source_specs <- index_source_specs(expr)
         env$reference_index <- reference_parse_data(
-            data, content, env$completion_data, uri, env$definitions)
-        # Performance: XML generation is expensive, but necessary for analysis
-        env$xml_data <- xmlparsedata::xml_parse_data(data)
+            data, content, env$completion_data, uri, env$definitions, env$syntax_data)
+        # Indexed providers need no XML. Keep it out of worker snapshots and
+        # materialize it from syntax only for class extraction or a legacy provider.
+        env$xml_deferred <- !include_xml
+        if (include_xml) env$xml_data <- syntax_xml(env$syntax_data)
+        xml <- function() if (is.null(env$xml_data)) syntax_xml(env$syntax_data) else env$xml_data
+        env$class_data <- tryCatch(class_parse_data(uri, content, xml(),
+                env$syntax_data, env$definitions), error = function(e) NULL)
+        # These original-id lookup tables are used only while constructing
+        # worker indexes. Providers use the compact physical syntax tree.
+        env$syntax_data[c("id_row", "id_first", "id_next", "id_function_scope", "scope_row",
+                "parent", "first_child", "next_sibling", "function_scope", "top", "order")] <- NULL
         # IMPORTANT: Do NOT create xml_doc here - this function runs in a child process
         # and xml2 external pointers cannot be serialized across process boundaries.
-        # xml_doc will be created in the main process by update_parse_data()
-        
+        # Legacy providers materialize it lazily in the main process.
     } else {
         # Keep the parse version current even while the user is typing an
         # incomplete expression. Providers can now return an empty result
         # instead of leaving requests queued until some later valid version.
+        env$member_data <- member_document_index(content)
         env$parse_error <- TRUE
         env$xml_data <- paste0(
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\" ?>\n",
@@ -661,13 +756,21 @@ normalize_package_request <- function(packages) {
     enc2utf8(unname(as.character(packages)))
 }
 
+member_package_request <- function(parse_data) {
+    list(
+        packages = normalize_package_request(parse_data$packages),
+        namespace_packages = normalize_package_request(unique(parse_data$member_data$packages))
+    )
+}
 
-parse_callback <- function(self, uri, version, parse_data) {
+
+parse_callback <- function(self, uri, version, parse_data, source_content = NULL, cache = TRUE) {
     workspace <- self$get_workspace(uri)
     if (is.null(parse_data) || !workspace$documents$has(uri)) return(NULL)
     logger$info("parse_callback called:", list(uri = uri, version = version))
     doc <- workspace$documents$get(uri)
-    if (!is.null(version) && !identical(doc$version, version)) {
+    if ((!is.null(version) && !identical(doc$version, version)) ||
+            (!is.null(source_content) && !identical(doc$content, source_content))) {
         logger$info("parse_callback: discarded stale result", list(
             uri = uri,
             result_version = version,
@@ -677,16 +780,21 @@ parse_callback <- function(self, uri, version, parse_data) {
     }
 
     parse_data$version <- version
+    doc$parse_failure <- NULL
     old_parse_data <- doc$parse_data
     previous_packages <- doc$requested_packages
     if (is.null(previous_packages) && !is.null(old_parse_data) &&
             !isTRUE(old_parse_data$parse_error)) {
-        previous_packages <- normalize_package_request(old_parse_data$packages)
+        previous_packages <- member_package_request(old_parse_data)
     }
+    topology <- workspace$index$topology_revision
     workspace$update_parse_data(uri, parse_data)
     if (!is.null(workspace$index) && isTRUE(workspace$index$enabled) &&
             is.function(self$refresh_index_documents)) {
-        self$refresh_index_documents(workspace, uri)
+        self$refresh_index_documents(workspace, uri,
+            refresh = isTRUE(doc$is_open) || is.null(workspace$index$package_root_for_uri(uri)) ||
+                length(workspace$index$source_edges$get(index_canonical_uri(uri), character())) > 0L ||
+                !identical(topology, workspace$index$topology_revision))
     }
 
     if (isTRUE(doc$pending_diagnostics)) {
@@ -696,57 +804,152 @@ parse_callback <- function(self, uri, version, parse_data) {
     }
 
     # Cache parse results in the main process (child-process caches are not shared)
-    if (!is.null(parse_data$content_hash)) {
+    if (cache && !is.null(parse_data$content_hash)) {
         cache_entry <- as.list(parse_data)
         cache_entry$xml_doc <- NULL
+        if (!is.null(cache_entry$navigation_data)) {
+            cache_entry$navigation_data$cache <- new.env(hash = TRUE, parent = emptyenv())
+        }
+        for (name in c("document_symbols_cache", "folding_ranges_cache", "link_strings_cache",
+                "linked_editing_cache", "colors_cache")) cache_entry[[name]] <- NULL
         # Local reference identities and cached flat symbols contain the URI.
         # Identical text in another file may share semantic tokens, but must
         # not reuse those document-specific provider results.
         cache_entry$cache_uri <- uri
-        workspace$parse_cache$set(parse_data$content_hash, cache_entry)
+        source_bytes <- sum(vapply(cache_entry$member_data$items, function(item) {
+            if (is.null(item$source$bytes)) 0 else item$source$bytes
+        }, numeric(1L)))
+        if (!is.null(cache_entry$navigation_data$bytes)) {
+            source_bytes <- source_bytes + cache_entry$navigation_data$bytes
+        }
+        if (!is.null(cache_entry$member_data$source_bytes)) {
+            source_bytes <- source_bytes + cache_entry$member_data$source_bytes
+        }
+        if (!is.null(cache_entry$class_data$bytes)) {
+            source_bytes <- source_bytes + cache_entry$class_data$bytes
+        }
+        if (inherits(workspace$parse_cache, "ByteLruCache")) {
+            workspace$parse_cache$set(parse_data$content_hash, cache_entry, additional_bytes = source_bytes)
+        } else {
+            workspace$parse_cache$set(parse_data$content_hash, cache_entry)
+        }
     }
 
     if (!isTRUE(parse_data$parse_error)) {
-        requested_packages <- normalize_package_request(parse_data$packages)
-        if (is.null(previous_packages) ||
+        requested_packages <- member_package_request(parse_data)
+        if (is.null(previous_packages) || isTRUE(doc$member_refresh) ||
                 !identical(previous_packages, requested_packages)) {
+            doc$member_refresh <- FALSE
             doc$requested_packages <- requested_packages
             self$resolve_task_manager$add_task(
                 uri,
-                resolve_task(self, uri, doc, requested_packages)
+                resolve_task(self, uri, doc, normalize_package_request(parse_data$packages),
+                    namespace_packages = parse_data$member_data$packages)
             )
-            doc$loaded_packages <- requested_packages
-            workspace$update_loaded_packages()
+            loaded_packages <- normalize_package_request(parse_data$packages)
+            changed <- !setequal(doc$loaded_packages, loaded_packages)
+            doc$loaded_packages <- loaded_packages
+            if (changed) workspace$update_loaded_packages()
         } else if (is.null(doc$requested_packages)) {
             doc$requested_packages <- requested_packages
         }
-    }
-
-    pending_replies <- self$pending_replies$get(uri, NULL)
-    for (name in names(pending_replies)) {
-        queue <- pending_replies[[name]]
-        handler <- self$request_handlers[[name]]
-        while (queue$size()) {
-            item <- queue$peek()
-            if (is.null(version) || item$version == version) {
-                handler(self, item$id, item$params)
-                queue$pop()
-            } else if (item$version < version) {
-                self$deliver(ResponseErrorMessage$new(
-                    item$id,
-                    "RequestCancelled",
-                    "Request superseded by a newer parse result"
-                ))
-                queue$pop()
-            } else {
-                break
-            }
+    } else if (length(parse_data$member_data$packages)) {
+        # A newly pasted namespace receiver can end at $ or @ before any
+        # valid parse has requested its metadata. Retain the last valid imports
+        # while resolving only syntax-confirmed namespace hints from recovery.
+        requested_packages <- previous_packages
+        if (is.null(requested_packages)) requested_packages <- list(
+            packages = normalize_package_request(doc$loaded_packages), namespace_packages = character())
+        requested_packages$namespace_packages <- normalize_package_request(union(
+            requested_packages$namespace_packages, parse_data$member_data$packages))
+        if (!identical(doc$requested_packages, requested_packages) || isTRUE(doc$member_refresh)) {
+            doc$member_refresh <- FALSE
+            doc$requested_packages <- requested_packages
+            self$resolve_task_manager$add_task(uri,
+                resolve_task(self, uri, doc, requested_packages$packages,
+                    namespace_packages = requested_packages$namespace_packages))
         }
     }
+
+    if (is.function(self$queue_pending_replies)) {
+        self$queue_pending_replies(uri)
+    } else {
+        drain_pending_replies(self, uri, version)
+    }
+    invisible(NULL)
 }
 
-parse_task <- function(self, uri, document, delay = 0) {
+#' Serve a bounded round of pending providers, rotating between methods
+#' @noRd
+drain_pending_replies <- function(self, uri, version, max_replies = Inf, first = 1L) {
+    queues <- self$pending_replies$get(uri, NULL)
+    n <- length(queues)
+    processed <- 0L
+    if (!n) return(list(processed = processed, ready = FALSE, first = 1L))
+    eligible <- function(queue, method) {
+        if (!queue$size()) return(FALSE)
+        item <- queue$peek()
+        if (!is.null(version) && !is.null(item$version) && item$version > version) return(FALSE)
+        if (!is.null(document) && identical(item$version, document$version) &&
+                method %in% c("textDocument/completion", "textDocument/hover", "textDocument/signatureHelp")) {
+            point <- document$from_lsp_position(item$params$position)
+            call <- if (identical(method, "textDocument/signatureHelp")) {
+                document$detect_call(point, signature = TRUE)
+            } else {
+                NULL
+            }
+            if (index_context_waiting(self, self$get_workspace(uri), document, point,
+                    hover = identical(method, "textDocument/hover"), call = call)) return(FALSE)
+            if (identical(method, "textDocument/completion") &&
+                    member_metadata_waiting(self, uri, document, point)) return(FALSE)
+            if (s3_metadata_waiting(self, uri, document, point,
+                    hover = identical(method, "textDocument/hover"), call = call)) return(FALSE)
+        }
+        TRUE
+    }
+    repeat {
+        document <- if (is.function(self$get_workspace)) self$get_workspace(uri)$documents$get(uri, NULL)
+        readiness <- lapply(names(queues), function(method) {
+            tryCatchStack(eligible(queues[[method]], method), error = identity)
+        })
+        ready <- vapply(readiness, function(result) inherits(result, "error") || isTRUE(result), logical(1L))
+        available <- which(ready)
+        if (!length(available) || processed >= max_replies) break
+        after <- available[available >= first]
+        selected <- if (length(after)) after[[1L]] else available[[1L]]
+        item <- queues[[selected]]$pop()
+        first <- selected %% n + 1L
+        if (inherits(readiness[[selected]], "error")) {
+            self$deliver(ResponseErrorMessage$new(item$id, "InternalError", to_string(readiness[[selected]])))
+        } else if (!is.null(version) && !is.null(item$version) && item$version < version) {
+            self$deliver(ResponseErrorMessage$new(item$id, "RequestCancelled",
+                    "Request superseded by a newer parse result"))
+        } else {
+            handler <- self$request_handlers[[names(queues)[[selected]]]]
+            tryCatchStack(handler(self, item$id, item$params), error = function(e) {
+                self$deliver(ResponseErrorMessage$new(item$id, "InternalError", to_string(e)))
+            })
+        }
+        processed <- processed + 1L
+    }
+    list(processed = processed, ready = any(ready), first = first)
+}
+
+parse_task <- function(self, uri, document, delay = 0, retry = TRUE) {
     version <- document$version
+    source_content <- document$content
+    document$parse_generation <- document$parse_generation + 1L
+    document$parse_failure <- NULL
+    generation <- document$parse_generation
+    was_open <- document$is_open
+    if (!is.null(document$parse_data) &&
+            identical(version, document$parse_data$version) &&
+            identical(source_content, document$parsed_content)) {
+        # Saving unchanged content still refreshes diagnostics and package
+        # metadata, but must not reparse a buffer evicted from the LRU cache.
+        parse_callback(self, uri, version, document$parse_data, source_content, cache = FALSE)
+        return(NULL)
+    }
     if (document$is_rmarkdown) {
         content <- document$content
         cache_content <- normalize_parse_content(
@@ -759,12 +962,31 @@ parse_task <- function(self, uri, document, delay = 0) {
 
     # Check cache in the main process before spawning a child task
     workspace <- self$get_workspace(uri)
+    index <- workspace$index
+    index_key <- if (!is.null(index)) index$diagnostics_generation(uri)$index
+    current <- function() {
+        identical(self$get_workspace(uri), workspace) &&
+            identical(workspace$index, index) &&
+            (is.null(index) || identical(index$diagnostics_generation(uri)$index, index_key)) &&
+            identical(workspace$documents$get(uri, NULL), document) &&
+            identical(document$parse_generation, generation) &&
+            identical(document$is_open, was_open) &&
+            identical(document$version, version) && identical(document$content, source_content)
+    }
+    if (!is.null(index) && index$parse_failed(uri)) {
+        index$await_parse(uri, cacheable = !isTRUE(document$is_open))
+    }
     if (workspace$parse_cache$has(content_hash)) {
         cached_entry <- workspace$parse_cache$get(content_hash)
         if (identical(cached_entry$cache_uri, uri)) {
             logger$info("parse_task: cache hit for", uri)
             cached_env <- list2env(cached_entry, parent = .GlobalEnv)
-            parse_callback(self, uri, version, cached_env)
+            if (!is.null(cached_env$navigation_data)) {
+                cached_env$navigation_data$cache <- new.env(hash = TRUE, parent = emptyenv())
+            }
+            # get() already refreshed recency. Rebuilding and sizing the same
+            # snapshot would repeat worker-result work on the request loop.
+            parse_callback(self, uri, version, cached_env, source_content, cache = FALSE)
             return(NULL)
         }
     }
@@ -775,17 +997,101 @@ parse_task <- function(self, uri, document, delay = 0) {
             uri = uri,
             content = content,
             is_rmarkdown = document$is_rmarkdown,
-            content_hash = content_hash
+            content_hash = content_hash,
+            include_xml = FALSE
         ),
-        callback = function(result) parse_callback(self, uri, version, result),
-        error = function(e) logger$info("parse_task:", e),
+        callback = function(result) parse_callback(self, uri, version, result, source_content),
+        error = function(e) {
+            logger$info("parse_task:", e)
+            if (!current()) return(invisible(NULL))
+            if (retry) {
+                # TaskManager removes the running entry after this callback.
+                # Replacing it here would cancel the task completing now.
+                self$queue_parse_retry(uri, function() {
+                    if (current()) self$parse_task_manager$add_task(uri,
+                        parse_task(self, uri, document, retry = FALSE))
+                })
+            } else {
+                document$parse_failure <- list(version = version,
+                    message = paste("Document parsing failed:", conditionMessage(e)))
+                fail_pending_replies(self, uri, version)
+                if (!is.null(index)) {
+                    index$fail_parse(uri)
+                    self$refresh_index_documents(workspace)
+                }
+            }
+        },
         delay = delay
     )
 }
 
+reply_parse_failure <- function(self, id, document) {
+    failure <- document$parse_failure
+    if (is.null(failure) || !identical(failure$version, document$version)) return(FALSE)
+    self$deliver(ResponseErrorMessage$new(id, "InternalError", failure$message))
+    TRUE
+}
+
+fail_pending_replies <- function(self, uri, version) {
+    document <- self$get_workspace(uri)$documents$get(uri)
+    for (queue in self$pending_replies$get(uri, NULL)) {
+        retained <- list()
+        while (queue$size()) {
+            item <- queue$pop()
+            if (!is.null(item$version) && !is.null(version) && item$version > version) {
+                retained[[length(retained) + 1L]] <- item
+            } else if (!is.null(item$version) && !is.null(version) && item$version < version) {
+                self$deliver(ResponseErrorMessage$new(item$id, "RequestCancelled",
+                        "Request superseded by a newer parse result"))
+            } else {
+                reply_parse_failure(self, item$id, document)
+            }
+        }
+        for (item in retained) queue$push(item)
+    }
+    invisible(NULL)
+}
+
 resolve_callback <- function(self, uri, version, packages) {
+    # Version changes or a metadata-application error must not strand requests
+    # after TaskManager removes the completed resolve task.
+    on.exit(s3_queue_ready(self, uri), add = TRUE)
     workspace <- self$get_workspace(uri)
     if (!workspace$documents$has(uri)) return(NULL)
+    doc <- workspace$documents$get(uri)
+    if (!identical(doc$version, version) &&
+            !(is.list(packages) && !is.null(packages$requested) &&
+                identical(doc$requested_packages, packages$requested))) return(NULL)
+    if (is.list(packages) && !is.null(packages$members)) {
+        # Background workspace files also prepare metadata. Prefer packages
+        # requested by open documents when those results compete for space.
+        open_documents <- Filter(function(document) isTRUE(document$is_open), workspace$documents$values())
+        protect <- unique(unlist(lapply(open_documents, function(document) {
+            c(document$requested_packages$packages, document$requested_packages$namespace_packages)
+        }), use.names = FALSE))
+        protect <- union(protect, workspace$startup_member_packages)
+        for (package in names(packages$members)) {
+            snapshot <- packages$members[[package]]
+            if (inherits(workspace$member_metadata, "MemberMetadataCache")) {
+                previous <- workspace$member_metadata$catalog(package)
+                if (isTRUE(nzchar(snapshot$generation)) && identical(previous$generation, snapshot$generation)) next
+                workspace$member_metadata$set(package, snapshot, protect = protect)
+                next
+            }
+            index <- member_index_thaw(snapshot)
+            if (!is.null(index)) {
+                if (inherits(workspace$member_metadata, c("ByteLruCache", "MemberMetadataCache"))) {
+                    workspace$member_metadata$set(package, as.list(index), protect = protect)
+                } else {
+                    workspace$member_metadata$set(package, as.list(index))
+                }
+            }
+        }
+        if (!is.null(packages$s3) && !is.null(workspace$s3_metadata)) {
+            for (package in names(packages$s3)) workspace$s3_metadata$set(package, packages$s3[[package]], protect)
+        }
+        packages <- packages$packages
+    }
     logger$info("resolve_callback called:", list(uri = uri, version = version))
     workspace$load_packages(packages)
     doc <- workspace$documents$get(uri)
@@ -793,13 +1099,68 @@ resolve_callback <- function(self, uri, version, packages) {
     workspace$update_loaded_packages()
 }
 
-resolve_task <- function(self, uri, document, packages, delay = 0) {
+resolve_member_task <- function(self, uri, document, packages, namespace_packages) {
+    workspace <- self$get_workspace(uri)
+    metadata <- workspace$member_metadata
+    known <- list()
+    if (!is.null(metadata)) {
+        for (package in metadata$keys()) {
+            catalog <- if (is.function(metadata$catalog)) metadata$catalog(package) else metadata$get(package)
+            if (!isTRUE(catalog$dataset_only) && is.null(catalog$error) && !is.null(catalog$identity)) {
+                known[package] <- list(catalog$identity)
+            }
+        }
+    }
+    requested <- document$requested_packages
     version <- document$version
+    current <- function() {
+        identical(self$get_workspace(uri), workspace) &&
+            identical(workspace$documents$get(uri, NULL), document) &&
+            identical(document$requested_packages, requested)
+    }
     create_task(
-        target = resolve_attached_packages,
-        args = list(pkgs = packages),
+        target = package_call(member_resolve_packages),
+        args = list(pkgs = packages, lib_paths = .libPaths(), namespace_packages = namespace_packages,
+            prepare = TRUE, prepare_s3 = FALSE, known_members = known, cache_dir = package_metadata_cache_root()),
+        callback = function(result) {
+            if (current()) resolve_callback(self, uri, version, result)
+        },
+        error = function(e) {
+            on.exit(s3_queue_ready(self, uri), add = TRUE)
+            logger$info("member metadata task:", e)
+        },
+        profiles = FALSE
+    )
+}
+
+resolve_task <- function(self, uri, document, packages, delay = 0, namespace_packages = character()) {
+    split_members <- !is.null(self$member_task_manager)
+    if (split_members) self$member_task_manager$cancel(uri)
+    # Startup packages already belong to the workspace. A document with no
+    # package requests needs no subprocess to rediscover that same search path.
+    if (!length(packages) && !length(namespace_packages)) return(NULL)
+    version <- document$version
+    prepare_members <- isTRUE(lsp_settings$get("member_completion"))
+    # Neither worker depends on the other's result. In particular, an S3
+    # timeout must not prevent member models from being prepared and applied.
+    if (split_members && prepare_members) {
+        self$member_task_manager$add_task(uri,
+            resolve_member_task(self, uri, document, packages, namespace_packages))
+    }
+    create_task(
+        target = package_call(member_resolve_packages),
+        args = list(pkgs = packages, lib_paths = .libPaths(), namespace_packages = namespace_packages,
+            prepare = prepare_members && !split_members,
+            prepare_s3 = isTRUE(lsp_settings$get("s3_dispatch")), cache_dir = package_metadata_cache_root()),
         callback = function(result) resolve_callback(self, uri, version, result),
-        error = function(e) logger$info("resolve_task:", e),
-        delay = 0
+        error = function(e) {
+            on.exit(s3_queue_ready(self, uri), add = TRUE)
+            logger$info("resolve_task:", e)
+            workspace <- self$get_workspace(uri)
+            for (package in unique(c(startup_packages, packages, namespace_packages))) workspace$s3_metadata$set(package,
+                list(schema = 1L, package = package, generation = "", functions = list(), objects = list(), methods = list(), dependencies = character(), error = conditionMessage(e)))
+        },
+        delay = delay,
+        profiles = FALSE
     )
 }

@@ -48,6 +48,9 @@ on_initialize <- function(self, id, params) {
     server_capabilities <- merge_list(
         server_capabilities,
         lsp_settings$get("server_capabilities"))
+    server_capabilities <- disable_dynamic_formatting_capabilities(server_capabilities, self$ClientCapabilities)
+    server_capabilities <- configure_code_action_documentation(self, server_capabilities)
+    server_capabilities <- configure_text_document_content(self, server_capabilities)
     self$ServerCapabilities <- server_capabilities
     self$deliver(Response$new(id = id, result = list(capabilities = server_capabilities)))
 }
@@ -59,6 +62,8 @@ on_initialize <- function(self, id, params) {
 #' @noRd
 on_initialized <- function(self, params) {
     logger$info("on_initialized")
+    register_backend_watches(self)
+    sync_formatting_capabilities(self, initialized = TRUE)
     # a bit like devtools::load_all()
     self$load_workspaces()
     # TODO: result lint result of the package
@@ -70,8 +75,12 @@ on_initialized <- function(self, params) {
 #' Handler to the `shutdown` [Request].
 #' @noRd
 on_shutdown <- function(self, id, params) {
+    if (is.function(self$end_workspace_progress)) {
+        for (workspace in self$workspaces$values()) self$end_workspace_progress(workspace, "Server stopped")
+    }
+    if (!is.null(self$text_document_content)) self$text_document_content$clear()
     self$exit_flag <- TRUE
-    self$deliver(Response$new(id = id, result = list()))
+    self$deliver(Response$new(id = id, result = NULL))
 }
 
 
@@ -80,6 +89,10 @@ on_shutdown <- function(self, id, params) {
 #' Handler to the `exit` [Notification].
 #' @noRd
 on_exit <- function(self, params) {
+    if (is.function(self$end_workspace_progress)) {
+        for (workspace in self$workspaces$values()) self$end_workspace_progress(workspace, "Server stopped")
+    }
+    if (!is.null(self$text_document_content)) self$text_document_content$clear()
     self$exit_flag <- TRUE
 }
 
@@ -90,6 +103,12 @@ on_exit <- function(self, params) {
 cancel_request <- function(self, params) {
     request_id <- params$id
     if (!is.null(request_id)) cancel_formatting_requests(self, id = request_id)
+    if (!is.null(self$index_requests)) {
+        key <- paste0(if (is.character(request_id)) "string:" else "number:", request_id)
+        request <- self$index_requests$pop(key, NULL)
+        if (!is.null(request$workspace)) request$workspace$index$prune_pending <- TRUE
+        if (!is.null(request)) self$deliver(ResponseErrorMessage$new(request$id, "RequestCancelled", "Request cancelled by client"))
+    }
     for (uri in self$pending_replies$keys()) {
         queues <- self$pending_replies$get(uri)
         for (queue in queues) {

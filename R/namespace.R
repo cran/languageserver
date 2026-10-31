@@ -5,6 +5,7 @@ PackageNamespace <- R6::R6Class("PackageNamespace",
         namespace = NULL,
         membership = NULL,
         function_metadata = NULL,
+        function_stubs = NULL,
         documentation = NULL,
         objects = character(0),
         functs = character(0),
@@ -29,8 +30,9 @@ PackageNamespace <- R6::R6Class("PackageNamespace",
             fn <- get(funct, envir = private$namespace)
             if (!is.function(fn)) return(NULL)
             cached <- private$function_metadata$get(funct, NULL)
+            context <- lapply(c("width", "digits", "scipen", "deparse.cutoff"), getOption)
             # Identity also detects assignInNamespace()/trace() replacements.
-            if (!is.null(cached) && identical(cached$fn, fn)) return(cached)
+            if (!is.null(cached) && identical(cached$fn, fn) && identical(cached$context, context)) return(cached)
             args <- args(fn)
             sig <- NULL
             if (!is.null(args)) {
@@ -39,11 +41,28 @@ PackageNamespace <- R6::R6Class("PackageNamespace",
                 sig <- paste0(trimws(sig, which = "left"), collapse = "")
                 sig <- gsub("^function\\s*", funct, sig)
             }
-            value <- list(fn = fn, signature = sig,
+            value <- list(fn = fn, context = context, signature = sig,
                 formals = if (is.null(args)) NULL else
                     formals(if (is.primitive(fn)) args else fn))
             private$function_metadata$set(funct, value)
             value
+        },
+
+        function_stub = function(funct) {
+            fn <- tryCatch(get0(funct, envir = private$namespace), error = function(e) NULL)
+            previous <- private$function_stubs$get(funct, NULL)
+            if (!is.null(previous) && identical(previous$fn, fn)) return(previous$value)
+            stub <- if (!is.function(fn)) {
+                NULL
+            } else if (is.primitive(fn)) {
+                fn
+            } else {
+                fun <- null_function
+                formals(fun) <- formals(fn)
+                utils::removeSource(fun)
+            }
+            private$function_stubs$set(funct, list(fn = fn, value = stub))
+            stub
         }
     ),
     public = list(
@@ -55,9 +74,9 @@ PackageNamespace <- R6::R6Class("PackageNamespace",
             private$namespace <- ns
             exports <- getNamespaceExports(ns)
             objects <- union(names(ns), exports)
-            private$objects <- sanitize_names(objects)
+            private$objects <- objects
             is_function <- vapply(private$objects, function(x) {
-                is.function(get0(x, ns))
+                tryCatch(is.function(get0(x, ns)), error = function(e) FALSE)
             }, logical(1L), USE.NAMES = FALSE)
             is_exported <- private$objects %in% exports
             private$functs <- private$objects[is_function]
@@ -70,8 +89,9 @@ PackageNamespace <- R6::R6Class("PackageNamespace",
                 stats::setNames(as.list(flags), private$objects),
                 hash = TRUE, parent = emptyenv())
             private$function_metadata <- collections::dict()
+            private$function_stubs <- collections::dict()
             private$lazydata <- as.character(names(.getNamespaceInfo(ns, "lazydata")))
-            private$documentation <- collections::dict()
+            private$documentation <- ByteLruCache$new(2 * 1024^2, 128L)
         },
 
         exists = function(objname, exported_only = TRUE) {
@@ -112,6 +132,17 @@ PackageNamespace <- R6::R6Class("PackageNamespace",
             private$lazydata
         },
 
+        get_diagnostic_stub = function(symbol) {
+            if (self$exists_funct(symbol, exported_only = FALSE)) {
+                private$function_stub(symbol)
+            } else if (self$exists(symbol, exported_only = FALSE) ||
+                    symbol %in% private$lazydata) {
+                NULL
+            } else {
+                any_args_function
+            }
+        },
+
         get_signature = function(funct, exported_only = TRUE) {
             private$function_info(funct, exported_only)$signature
         },
@@ -123,10 +154,19 @@ PackageNamespace <- R6::R6Class("PackageNamespace",
         get_documentation = function(topic) {
             private$ensure_namespace()
             pkgname <- self$package_name
-            if (private$documentation$has(topic)) {
-                return(private$documentation$get(topic))
-            }
+            previous <- private$documentation$get(topic, NULL)
+            context <- list(libraries = .libPaths(), parser = get_help_rd, converter = convert_doc_string)
+            if (identical(previous$context, context) && !is.null(previous$identity) &&
+                    identical(previous$identity, tryCatch(package_metadata_help_identity(previous$hfile, pkgname),
+                            error = function(e) NULL))) return(previous$value)
             hfile <- utils::help((topic), (pkgname))
+            identity <- tryCatch(package_metadata_help_identity(hfile, pkgname), error = function(e) NULL)
+            cache_path <- if (!is.null(identity)) package_metadata_cache_path("documentation", identity, topic)
+            cached <- package_metadata_cache_read(cache_path, identity)
+            if (!is.null(cached)) {
+                private$documentation$set(topic, list(context = context, identity = identity, hfile = hfile, value = cached))
+                return(cached)
+            }
 
             if (length(hfile) > 0) {
                 doc <- get_help_rd(hfile)
@@ -138,7 +178,7 @@ PackageNamespace <- R6::R6Class("PackageNamespace",
                 arguments <- list()
                 if (length(arguments_item)) {
                     arg_items <- arguments_item[vapply(arguments_item,
-                        function(arg) attr(arg, "Rd_tag") == "\\item", logical(1L))]
+                            function(arg) attr(arg, "Rd_tag") == "\\item", logical(1L))]
                     arg_names <- vapply(arg_items, function(item) {
                         argname <- item[[1]][[1]]
                         switch(attr(argname, "Rd_tag"),
@@ -157,22 +197,37 @@ PackageNamespace <- R6::R6Class("PackageNamespace",
             } else {
                 value <- list()
             }
-            private$documentation$set(topic, value)
+            private$documentation$set(topic, list(context = context, identity = identity, hfile = hfile, value = value))
+            package_metadata_cache_write(cache_path, identity, value)
             value
         },
 
-        get_definition = function(symbol, exported_only = TRUE) {
+        get_definition = function(symbol, exported_only = TRUE,
+            content_scheme = NULL) {
             code <- self$get_body(symbol, exported_only = exported_only)
             if (is.null(code)) {
                 return(NULL)
             }
 
-            # if the function exists in the workspace, write the code to a file
-            temp_file <- file.path(tempdir(), paste0(symbol, ".R"))
-            stringi::stri_write_lines(c(
+            text <- c(
                 "# Generated from function body. Editing this file has no effect.",
                 code
-            ), temp_file)
+            )
+            if (!is.null(content_scheme)) {
+                uri <- paste0(content_scheme, ":/",
+                    text_document_content_segment(self$package_name), "/",
+                    text_document_content_segment(symbol), ".R")
+                def <- list(uri = uri, range = range(
+                    position(0L, 0L), position(length(text), 0L)))
+                attr(def, "text_document_content") <- paste0(
+                    paste(text, collapse = "\n"), "\n")
+                attr(def, "namespace") <- self$package_name
+                return(def)
+            }
+
+            # Legacy clients open the generated body through a normal file URI.
+            temp_file <- file.path(tempdir(), paste0(symbol, ".R"))
+            stringi::stri_write_lines(text, temp_file)
             def <- list(
                 uri = path_to_uri(temp_file),
                 range = range(

@@ -5,6 +5,116 @@ latency of interactive requests. The baseline is commit `9618b5b`. Measurements
 below were taken locally with R 4.6.1 on macOS arm64; they are reproducible
 workloads, not timing assertions in the test suite.
 
+## Member metadata cache
+
+Run `R_LIBS=/path/to/library Rscript inst/benchmarks/member-metadata.R results.csv 10`
+against an installed package with Polars and R6 available. An optional third
+argument selects an R document. The benchmark prepares Polars, methods and R6
+metadata in a clean worker, then measures consecutive completion, signature and
+hover requests at each standalone `q`, `q1` and `q2` expression. It validates
+the provider results and records decoded cache hits and restores. Preparation,
+document parsing and explicit garbage collection are outside the timer;
+context selection, restoration and inference are inside it.
+
+Measured locally with R 4.6.1, Polars 1.16.0 and R6 2.6.1 on macOS arm64,
+using the affected document's three query positions, ten passes and 90 requests:
+
+| Provider | Before median / p95 (ms) | After median / p95 (ms) | Before / after restores |
+| --- | ---: | ---: | ---: |
+| Completion | 137 / 183.3 | 92 / 137 | 90 / 1 |
+| Signature help | 128 / 172 | 86 / 128 | 90 / 0 |
+| Hover | 129 / 166 | 86 / 128 | 90 / 0 |
+
+The baseline is `6365c20`. Polars and methods decoded indexes together exceed
+the 32 MB budget. The baseline restores all three packages on every request;
+catalog selection restores Polars once, then uses decoded hits. Catalogs share
+the existing snapshot budget, and full namespace indexes load on demand for
+cross-package inference. These timings include the first restore and remain
+machine-dependent; the regression tests assert cache behavior without timing
+thresholds.
+
+## S3 dispatch
+
+Run `R_LIBS=/path/to/library Rscript inst/benchmarks/s3-dispatch.R results.csv 2000`.
+An optional third argument adds comma-separated installed packages, for example
+`datawizard,tibble`. The script checks the selected methods, measures cold
+resolution and warm completion, hover and signature help in a large document,
+and compares ordinary requests with S3 enabled and disabled. It also reports
+workspace startup, metadata worker time and retained cache bytes. Five timing
+batches capture timer noise; these are local measurements, without timing
+assertions in the regression suite.
+
+## Persistent package cache validation
+
+Run `R_LIBS=/path/to/library Rscript --vanilla inst/benchmarks/package-cache.R results.csv 3 polars`.
+The optional package argument permits the same comparison with other installed
+packages. The script separates first namespace loading, uncached preparation,
+cache creation, warm disk hits and loaded-namespace validation. It records CPU
+and elapsed time and checks returned metadata; parsing and provider requests are
+not included. Run revisions serially with isolated libraries on the same host.
+
+Validation still inspects mutable namespace bindings and captured values.
+Canonical function syntax and unchanged binding facts are reused within a
+worker. Syntax memo keys are session-local, body/formals are checked on hits,
+and namespace replacement or producer changes invalidate validation facts.
+The worker memos are bounded at 64 MiB for syntax and 32 MiB for facts; neither
+is a persistent cache of live functions or document state.
+
+Serial local measurements on R 4.6.1/macOS arm64 with Polars 2.0.0 compared
+`da70d5f` with the validation-memo changes (ms; three repeated passes and one cache-creation run):
+
+| Operation | Before | After |
+| --- | ---: | ---: |
+| Uncached preparation | 6,830 | 6,744 |
+| Cache creation | 7,224 | 6,778 |
+| Warm disk hit | 373 | 211 |
+| Loaded-namespace validation | 336 | 179 |
+
+The initial loaded-namespace check remains necessary on every new worker.
+Mutable bindings still need inspection; this improvement reuses canonical
+syntax and derived facts rather than trusting only a package version or path.
+
+## Adaptive inference budget
+
+Run `R_LIBS=/path/to/library Rscript --vanilla inst/benchmarks/member-budget.R results.csv 3`.
+Polars metadata is prepared once outside the timer. Each cold run receives the
+same metadata and parsed source with fresh receiver, binding and invocation
+caches; two repeated requests follow it. Only the budget policy changes: a fixed one-second
+elapsed deadline versus the adaptive 250 ms initial allowance, capped at two
+seconds of CPU and five seconds elapsed. Policy order alternates between passes.
+
+Ordinary calls, long chains, wide argument lists, repeated conversions and
+recursive code use neutral fixtures. Stalled cases inject 25 or 150 ms at every
+inference clock checkpoint to model descheduling. They are controlled local
+experiments, not measurements from a remote SSH host. No document expressions,
+constructors or methods are executed. CPU/elapsed time, visited nodes, exhausted
+budgets, timeout flags and retained results are recorded. Compare cold rows to
+isolate the budget policy; warm rows show whether complete results can be reused.
+An exhausted or timed-out traversal must not be reported as a fast success.
+Completed binding prefixes can survive an exhausted request, allowing its retry
+to finish without restarting the entire chain. A final warm request measures
+reuse after that retry. Deadline checks occur at bounded traversal checkpoints;
+elapsed results can include one checkpoint's overshoot and provider cleanup.
+
+The same local setup, three passes and identical prepared metadata produced
+these cold medians. Ordinary requests remained below the timer's 1 ms
+resolution, and normal long chains took 685 ms with the fixed deadline versus
+694 ms with the adaptive policy. With 25 ms stalls, the fixed policy stopped
+around 1,016 ms on all three cold requests; adaptive analysis completed around
+2,363 ms with about 879 ms of CPU work. Repeated
+completed requests took approximately 1 ms. With 150 ms stalls, the first
+adaptive request stopped around 5,181 ms at the wall limit, a retry reused
+completed prefixes and finished around 4,428 ms, and the next request was below
+1 ms. The fixed policy continued to time out around 1,070 ms on its third
+request. These measurements show the deliberate cold-path tradeoff rather
+than a lower latency for every request.
+
+The 25,000-argument fixture stopped at 20,001 visits (including the exhausted
+visit) in 213 ms, down from about 1,513 ms before exhausted argument work and
+repeated list copying were removed. Depth-bound and recursive fixtures stopped
+in roughly 4 and 14 ms. Regression tests separately cover CPU/wall limits,
+explicit caller deadlines, cache invalidation and rejection of partial results.
+
 ## Design and implementation
 
 1. **Remove repeated parse-tree scans.** Native parent/child indexes classify
@@ -143,6 +253,47 @@ It prints JSON lines for preparation, each completion, and transport counts.
 Omit `--wait-parse` to type immediately after opening; `--open-delay`, `--pause`,
 and `--rounds` control other typing scenarios. `--profile /tmp/typing.Rprof`
 records an R sampling profile without enabling server debug logging.
+
+## Workspace startup
+
+`workspace-loading.py` generates 3,000 R files with 1,000 lines each and sends
+lightweight `completionItem/resolve` requests immediately after `initialized`,
+then every 100 ms. It measures whether the event loop can handle requests while
+loading the workspace. Use `--cached` to populate a valid persistent index
+before startup, and `--package` to put the files in a package's `R/` directory.
+Diagnostics are disabled; full package document parsing remains enabled.
+
+```sh
+python3 inst/benchmarks/workspace-loading.py /tmp/languageserver-after
+python3 inst/benchmarks/workspace-loading.py /tmp/languageserver-after --cached
+python3 inst/benchmarks/workspace-loading.py /tmp/languageserver-after --cached --package --requests 150
+```
+
+The benchmark prints each request's latency and a final summary. `--root`
+reuses a specified fixture directory, `--keep-fixture` preserves a generated
+directory, and `--files`, `--lines`, and `--symbols` control its contents.
+Each file repeats 50 assignment names by default. The generated fixture also
+contains a sampling profile and server stderr log.
+
+Measured locally against `dc9c2307` with R 4.6.1 on macOS arm64, using 3 million
+lines of code:
+
+| Workspace | First request before / after (ms) | Maximum subsequent request after (ms) |
+| --- | ---: | ---: |
+| Scripts, persistent cache | 7,279 / 26 | 79 |
+| Package, persistent cache | 18,445 / 22 | 99 |
+
+An uncached script workspace also fell from 5,092 to 22 ms for the first
+request. The cached runs used 100 probes for scripts and 150 for the package.
+Timings vary with hardware, system load, file sizes, and index contents.
+
+Discovery and cache decompression now run in the index worker. Results return
+in small batches, which the server installs within the index time budget.
+Package and sourced documents are read incrementally, and persistent catalog
+updates are transferred in bounded batches. File generations, cache metadata,
+source targets, and worker lifecycles prevent delayed discovery results from
+overwriting edits or resurrecting deleted files. Installing an individual full
+document parse can still cause shorter pauses.
 
 Regression coverage checks old/new result equivalence, Unicode and UTF-16,
 missing arguments, nested/overlapping scopes, cursor boundaries, literate and

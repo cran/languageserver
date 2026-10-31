@@ -14,8 +14,7 @@ local_function_signature <- function(document, node, symbol) {
         col2 = as.integer(xml_attr(closing, "col2")))
     # Only the formals are used by get_signature(). A large body contributes
     # no signature information and need not be allocated or parsed again.
-    expr <- parse(text = c(text, "NULL"), keep.source = FALSE)
-    get_signature(symbol, expr[[1L]])
+    analysis_function_header(document, text, symbol)$signature
 }
 
 #' Parse a signature once for both parameter names and LSP label ranges
@@ -45,10 +44,10 @@ parse_signature_parameters <- function(signature) {
     signature_info(signature)$parameters
 }
 
-#' Detect the active positional or named argument without parsing user code
+#' Detect the active positional or named argument without evaluating source
 #' @noRd
 detect_active_parameter <- function(content, start_row, start_col,
-    end_row, end_col, signature = NULL) {
+    end_row, end_col, signature = NULL, no_active_parameter = FALSE) {
     if (start_row < 0L || start_row >= length(content) || end_row < start_row) {
         return(0L)
     }
@@ -66,7 +65,13 @@ detect_active_parameter <- function(content, start_row, start_col,
     lines[[1L]] <- substring(lines[[1L]], start_col + 2L)
     parameters <- if (is.null(signature)) character() else signature_info(signature)$names
     .Call("active_parameter_c", PACKAGE = "languageserver",
-        paste0(lines, collapse = "\n"), parameters)
+        paste0(lines, collapse = "\n"), parameters, content,
+        as.integer(start_row), as.integer(start_col),
+        isTRUE(no_active_parameter) && !is.null(signature))
+}
+
+signature_no_active_parameter_support <- function(client_capabilities) {
+    isTRUE(client_capabilities$textDocument$signatureHelp$signatureInformation$noActiveParameterSupport)
 }
 
 #' the response to a textDocument/signatureHelp Request
@@ -75,13 +80,53 @@ detect_active_parameter <- function(content, start_row, start_col,
 #' (as with [base::args()]).
 #'
 #' @noRd
-signature_reply <- function(id, uri, workspace, document, point) {
+signature_reply <- function(id, uri, workspace, document, point, client_capabilities = NULL,
+    call = NULL) {
 
-    if (!check_scope(uri, document, point)) {
+    no_active_parameter <- signature_no_active_parameter_support(client_capabilities)
+
+    if (!check_r_region(document, point)) {
         return(Response$new(id, list(signatures = NULL)))
     }
 
-    result <- document$detect_call(point)
+    result <- if (is.null(call)) document$detect_call(point, signature = TRUE) else call
+    if (isTRUE(lsp_settings$get("member_completion"))) {
+        location <- member_call_location(document, point, result,
+            symbols = member_symbol_required(workspace, document))
+        if (!is.null(location)) {
+            symbol <- member_symbol(uri, workspace, document, location)
+            if (is.null(location$cursor$accessor) && is.null(symbol$value$s7_generator) &&
+                    !identical(symbol$value$r6_role, "constructor") && is.null(symbol$value$r6_owner)) location <- NULL
+        }
+        if (!is.null(location)) {
+            sig <- symbol$signature
+            if (is.null(sig)) {
+                return(Response$new(id, list(signatures = list())))
+            }
+            doc <- member_symbol_documentation(workspace, symbol, uri)
+            description <- if (is.character(doc)) doc else if (is.list(doc)) doc$description
+            return(Response$new(id, result = list(
+                signatures = list(list(
+                    label = sig,
+                    documentation = list(kind = "markdown", value = if (is.null(description)) "" else description),
+                    parameters = parse_signature_parameters(sig)
+                )),
+                activeSignature = 0L,
+                activeParameter = detect_active_parameter(
+                    document$content,
+                    result$opening$row, result$opening$col, point$row, point$col, sig,
+                    no_active_parameter
+                )
+            )))
+        }
+    }
+
+    s3 <- tryCatch(resolve_s3_call(uri, workspace, document, point, call = result),
+        error = function(e) {
+            logger$info("S3 signature:", e)
+            NULL
+        })
+    if (!is.null(s3)) return(s3_signature_reply(id, workspace, document, point, s3, client_capabilities))
 
     SignatureInformation <- list()
     activeSignature <- NULL
@@ -89,7 +134,25 @@ signature_reply <- function(id, uri, workspace, document, point) {
     sig <- NULL
 
     if (nzchar(result$token)) {
-        xdoc <- workspace$get_parse_data(uri)$xml_doc
+        parse_data <- workspace$get_parse_data(uri)
+        syntax <- parse_data$syntax_data
+        if (result$accessor == "" && !is.null(syntax)) {
+            found <- navigation_definitions(parse_data, point$row + 1L, point$col + 1L,
+                result$token, "signature", last = TRUE)
+            if (length(found)) {
+                declaration <- found[[1L]]
+                sig <- navigation_signature(document, parse_data, declaration, result$token)
+                doc <- navigation_documentation(document, parse_data, syntax$line1[[declaration]])
+                doc_string <- if (is.character(doc)) doc else if (is.list(doc)) {
+                    if (is.null(doc$markdown)) doc$description else doc$markdown
+                }
+                documentation <- if (is.null(doc)) "" else list(kind = "markdown", value = if (is.null(doc_string)) "" else doc_string)
+                SignatureInformation <- list(list(label = sig, documentation = documentation,
+                        parameters = parse_signature_parameters(sig)))
+                activeSignature <- 0
+            }
+        }
+        xdoc <- if (is.null(syntax)) parse_data_xml(parse_data)
         if (result$accessor == "" && !is.null(xdoc)) {
             row <- point$row + 1
             col <- point$col + 1
@@ -105,7 +168,7 @@ signature_reply <- function(id, uri, workspace, document, point) {
                 doc_line1 <- detect_comments(document$content, func_line1 - 1) + 1
                 if (doc_line1 < func_line1) {
                     comment <- document$content[doc_line1:(func_line1 - 1)]
-                    doc <- convert_comment_to_documentation(comment)
+                    doc <- analysis_documentation(document, comment)
                     doc_string <- NULL
 
                     if (is.character(doc)) {
@@ -171,34 +234,29 @@ signature_reply <- function(id, uri, workspace, document, point) {
     }
 
     # Calculate activeParameter if we have a valid signature
-    if (!is.null(activeSignature) && nzchar(result$token)) {
+    if (!is.null(activeSignature) && nzchar(result$token) && !is.null(result$opening)) {
         logger$info("Calculating activeParameter for token: ", result$token)
-        fub_result <- find_unbalanced_bracket(document$content, point$row, point$col - 1)
-        loc <- fub_result[[1]]
-        bracket <- fub_result[[2]]
-        logger$info("Bracket location: row=", loc[1], ", col=", loc[2], ", bracket='", bracket, "'")
-        
-        if (loc[1] >= 0 && loc[2] >= 0 && bracket == "(") {
-            activeParameter <- detect_active_parameter(
-                document$content,
-                loc[1],  # start_row (0-based)
-                loc[2],  # start_col (0-based)
-                point$row,  # end_row (0-based)
-                point$col,   # end_col (0-based)
-                sig          # signature for named argument detection
-            )
-            logger$info("activeParameter set to: ", activeParameter)
-        } else {
-            logger$info("Invalid bracket location or not a parenthesis")
-        }
+        activeParameter <- detect_active_parameter(
+            document$content,
+            result$opening$row,
+            result$opening$col,
+            point$row,
+            point$col,
+            sig,
+            no_active_parameter
+        )
+        logger$info("activeParameter set to: ", activeParameter)
     }
 
     response_result <- list(signatures = SignatureInformation)
     response_result$activeSignature <- activeSignature
-    response_result$activeParameter <- activeParameter
+    # Assign through a list slice so an explicit null survives serialization.
+    if (!is.null(activeParameter) || (no_active_parameter && !is.null(activeSignature))) {
+        response_result["activeParameter"] <- list(activeParameter)
+    }
     
     logger$info("signature_reply result: activeSignature=", activeSignature,
-                ", activeParameter=", activeParameter)
+        ", activeParameter=", activeParameter)
 
     Response$new(id, result = response_result)
 }
